@@ -70,16 +70,19 @@ def fixed_window(frames: list, R: float, occupied: float = 0.05) -> list:
 
 
 def _grid_lines(tile: np.ndarray, n_cells: int, step_cells: float) -> np.ndarray:
-    """Faint grid fixed to the window, painted only on empty background (never over the creature)."""
+    """Faint grid fixed to the window, painted only on empty background (never over the creature): light
+    grey on white (one-channel colour map), dark grey on black (2-3 channels as RGB)."""
     t = tile.copy()
     px = t.shape[0]
-    bg = t.min(-1) > 245
+    dark = int(np.median(np.concatenate([t[0], t[-1], t[:, 0], t[:, -1]]).max(-1))) < 128
+    bg = t.max(-1) < 14 if dark else t.min(-1) > 245
+    val = 52 if dark else 232
     pos = [int(round(k * step_cells * px / n_cells)) for k in range(1, int(n_cells / step_cells) + 1)]
     for p in pos:
         if 0 < p < px:
             for sl in (np.s_[p, :], np.s_[:, p]):
                 m = bg[sl]
-                t[sl][m] = 232
+                t[sl][m] = val
     return t
 
 
@@ -483,13 +486,13 @@ load();
 </script></body></html>"""
 
 
-def human_pairs(out: Path, n: int = 60, seed: int = 1) -> list:
-    """The pairs you rate: a fixed random subset of pairs.json with random left/right sides (human_pairs.json)."""
+def human_pairs(out: Path, n: int = 60, seed: int = 1, source: str = "pairs.json") -> list:
+    """The pairs you rate: a fixed random subset of `source` with random left/right sides (human_pairs.json)."""
     out = Path(out)
     p = out / "human_pairs.json"
     if p.exists():
         return json.loads(p.read_text())
-    pairs = json.loads((out / "pairs.json").read_text())
+    pairs = json.loads((out / source).read_text())
     rng = np.random.default_rng(seed)
     pick = [pairs[i] for i in sorted(rng.choice(len(pairs), min(n, len(pairs)), replace=False))]
     order = rng.permutation(len(pick))
@@ -502,13 +505,13 @@ def human_pairs(out: Path, n: int = 60, seed: int = 1) -> list:
     return hp
 
 
-def make_server(out: Path, n: int = 60, port: int = 8765):
+def make_server(out: Path, n: int = 60, port: int = 8765, source: str = "pairs.json", question: str = HUMAN_QUESTION):
     """The rating server (localhost only); every click is appended to human.csv straight away."""
     import threading
     import time as _time
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     out = Path(out)
-    hp = human_pairs(out, n)
+    hp = human_pairs(out, n, source=source)
     path = out / "human.csv"
     lock = threading.Lock()
     fields = ["time", "a", "b", "left", "right", "choice", "winner"]
@@ -530,7 +533,8 @@ def make_server(out: Path, n: int = 60, port: int = 8765):
 
         def do_GET(self):
             if self.path == "/":
-                return self._send(200, RATE_PAGE.replace("QUESTION", HUMAN_QUESTION).encode(), "text/html; charset=utf-8")
+                return self._send(200, RATE_PAGE.replace("QUESTION", question).replace("runs/vlmtest/human.csv", str(path)).encode(),
+                                  "text/html; charset=utf-8")
             if self.path == "/pairs":
                 done = rated()
                 return self._send(200, json.dumps({"todo": [p for p in hp if (p["a"], p["b"]) not in done], "total": len(hp)}).encode(),
@@ -574,9 +578,10 @@ def make_server(out: Path, n: int = 60, port: int = 8765):
     return srv
 
 
-def rate(out: Path, n: int = 60, port: int = 8765, open_browser: bool = True, log=print) -> None:
+def rate(out: Path, n: int = 60, port: int = 8765, open_browser: bool = True, source: str = "pairs.json",
+         question: str = HUMAN_QUESTION, log=print) -> None:
     import webbrowser
-    srv = make_server(out, n, port)
+    srv = make_server(out, n, port, source, question)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
     log(f"rating page: {url}  ({srv.pairs_left} of {srv.pairs_total} pairs left; answers go to "
         f"{Path(out) / 'human.csv'}; Ctrl-C to stop, progress is kept)")

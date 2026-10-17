@@ -583,6 +583,74 @@ Deferred (novelty, not validity): one family dominating the top of the archive i
 hand-made descriptors; Experiment B (embedding novelty) or a per-lineage cap would address it. For
 building a labelling pool, sampling stratified by lineage is enough.
 
+### Run 2 results (alive v2, Colab T4, 2026-10-17)
+
+Survey (all 2,265 multi-channel creatures that fit, at R = 20): 644 alive (28%): 233 338/826,
+233c 254/637, 231b 64/626, 221 20/40, 233s 24/41, 223 9/21, 231 3/23, 232 2/51. The largest
+failure classes are frozen (511) and spread (316). Calibration: 553 of 644 alive at 2x; 2x
+distance threshold 2.95 (p95; classic catalogue 1.98; p99 6.6); texture-loss threshold 0.037 (p99;
+median loss 0.000). Chan's most textured creatures (`sheet_texture.png`) are real fine structure
+(dotted halos, fringes, rings) and lose almost none of it at 2x, as predicted.
+
+Search: 45 roots (64 picked, 56 alive, 45 coherent at 2x); 3,202 evaluations, 63 generations,
+42 min; archive 224 (179 descendants, 38 of 45 lineages); children alive 50%; 2x failures 45 (run 1:
+80), texture-loss failures 2 (the check rarely binds, as intended). Drift from root: median 3.3
+(noise floor 0.56), max 10.5. 47% of descendants lie beyond the reference set's p90
+nearest-neighbour distance (run 1: 27%, against a smaller reference set).
+
+What the pictures show:
+- The top of `sheet_novel` is varied: 13 lineages among the 40 farthest (run 1: one lineage had 16
+  of 40). New forms: linked double rings ("dumbbells", 233:Z18A9R), a spiral that grew out of a
+  blob (233c:G26RKS, #215), a hollowed green disc with a striped fringe (231b:E45DZL), a ring that
+  loses its arms (233c:WWS78E).
+- One new loophole, on the novelty side: very light creatures. Eight of the top 40 (#150, #154,
+  #156, #179 from 221:#14; #216, #210, #133, #145) are faint, small single-channel crescents or
+  outlines, lighter than 99% of Chan's living creatures. They are alive (peak values 0.8-1.0, they
+  move and persist), but mass is one of the 20 descriptors, so being lighter than anything Chan
+  has counts as novel. A validity question only if we want a minimum size; otherwise one for the
+  novelty measure (Experiment B) and for the VLM, which should rate them low.
+- No grid-scale texture anywhere in the archive (largest texture loss 0.031).
+
+Verdict: the substrate and the alive check pass. The check is frozen as alive v2 (`configs/found.yaml`
+plus the survey's `calibration.json`) for the labelling phase.
+
+## Phase 2: labelling pool (built 2026-10-17)
+
+Order of work from here: check the teacher (Luna, `curate`) on the new kind of creature, distil it
+(Phase 3), then search against the student (Phase 4). The prompt sweep and the 85% agreement with
+Felix were measured on classic and multikernel creatures at R = 13; multi-channel creatures at R = 20
+look different, so the check is repeated on this pool before any label is used for training.
+
+`src/lenia/pool.py`, `lenia pool build | label | rate | report`:
+- **build** (Colab): about 300 of Chan's living creatures that pass the calibrated checks (at most 40%
+  from one file) plus up to 10 descendants per lineage from the run-2 archive; each re-simulated
+  from its stored pattern and rendered as the fixed-camera 2x2 image (faint grid now drawn on black
+  backgrounds too). 20% of the creatures are held out (stratified chan/search). Pairs: each training
+  creature in about 16 random training pairs, each held-out creature in about 16 held-out pairs. Held-out pairs
+  are only between held-out creatures, so the student is tested on creatures it never saw.
+- **label** (your Mac): Luna on every pair (training labels; its held-out labels are the teacher's
+  answers the student is scored against), Jev on held-out pairs only (a second opinion).
+  `labels_<judge>_<prompt>.csv`, one row per pair with both orders and the order-averaged p_a.
+- **rate**: 60 held-out pairs for you, with the judge's own question.
+- **report**: order agreement, first-slot rate, confidence, share of decisive pairs, Luna vs Jev,
+  agreement with you, chan vs search win rates, what the scores track (size, mass, speed, change,
+  texture), top and bottom 12 per judge.
+
+Gate before Phase 3: on this pool Luna should keep order agreement around 0.8 or better and agree with
+Felix about as well as before (0.85 on the old pool), and Luna and Jev should agree clearly above
+chance. If not, fix the judge (prompt, image) before distilling.
+
+On the Mac (Drive for desktop makes the Colab folder a local path):
+
+```bash
+RUNS="$HOME/Library/CloudStorage/GoogleDrive-zhangxufei05@gmail.com/My Drive/lenia-runs"
+uv run lenia --runs "$RUNS" pool label --judge luna --limit 20        # smoke test, a few cents
+uv run lenia --runs "$RUNS" pool label --judge luna                   # all pairs (about 7,000 calls)
+uv run lenia --runs "$RUNS" pool label --judge jev --split heldout
+uv run lenia --runs "$RUNS" pool rate                                 # 60 held-out pairs for you
+uv run lenia --runs "$RUNS" pool report
+```
+
 ## Open issues (as of 2026-10-17)
 
 **Viability (the 'alive' judge)**
@@ -657,6 +725,7 @@ uv run lenia guided rate                                                    # ra
 uv run lenia found download                                                 # Chan's found/ collections -> data/found/
 uv run lenia --backend auto --config configs/found.yaml found survey [--n-per-file 100]   # Experiment A: survey + calibration at R = 20
 uv run lenia --backend auto --config configs/found.yaml explore --from-found runs/found-survey --roots 64 --out runs/expA   # step 2 (resumable)
+uv run lenia --backend auto --config configs/found.yaml pool build                     # Phase 2 pool (then label/rate/report, see above)
 uv run lenia trace --run runs/survey-classic --rules 18,141            # a rollout's future: mass, size, speed, thumbnails
 uv run python scripts/calibrate_growth.py <explore runs...>           # growth-threshold calibration
 uv run python scripts/calibrate_rescale.py                            # resolution-check calibration (catalogue)

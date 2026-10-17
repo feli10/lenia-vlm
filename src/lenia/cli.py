@@ -12,6 +12,8 @@
              prompts, rate pairs yourself, report (build | run | rate | report); `run` needs API keys in .env
   guided     VLM-guided search: a judge (Luna, prompt 'curate') accepts mutations it prefers, under the
              alive + resolution constraints (run | check | rate | gif); needs API keys in .env
+  found      Chan's found/ collections: download | survey (at a common R, with calibration of the checks)
+  pool       Phase 2 labelling pool: build (Colab) | label (needs API keys) | rate | report
   bench      check the GPU simulator against numpy and time both (use with --backend auto)
   show       animated GIF of rules: from a survey (--run, --rules or --alive), from Chan's catalogue
              (--chan O2u,S1s) or a rule given as JSON (--rule); the camera follows the creature
@@ -124,6 +126,23 @@ def main(argv=None) -> int:
     p.add_argument("--limit", type=int, help="run: only the first N pairs (smoke test)")
     p.add_argument("--yes", action="store_true", help="run: proceed even if the estimate exceeds the budget")
     p.add_argument("--verbose", action="store_true", help="run: print every failed call")
+    p.add_argument("--seed", type=int, default=0)
+
+    p = sub.add_parser("pool")                  # Phase 2: labelling pool (see src/lenia/pool.py)
+    p.add_argument("action", choices=["build", "label", "rate", "report"])
+    p.add_argument("--out", help="pool folder (default <runs>/pool)")
+    p.add_argument("--survey", help="build: calibrated `found survey` folder (default <runs>/found-survey-v2)")
+    p.add_argument("--archive", help="build: explore folder (default <runs>/expA2-explore)")
+    p.add_argument("--n-chan", type=int, default=300, help="build: how many of Chan's creatures")
+    p.add_argument("--per-lineage", type=int, default=10, help="build: at most this many search descendants per lineage")
+    p.add_argument("--judge", default="luna", help="label: judge name (configs/lenia.yaml: judges)")
+    p.add_argument("--prompt", default="curate", help="label: prompt id (src/lenia/prompts.py)")
+    p.add_argument("--split", choices=["all", "train", "heldout"], default="all", help="label: which pairs")
+    p.add_argument("--limit", type=int, help="label: only the first N pairs (smoke test)")
+    p.add_argument("--yes", action="store_true", help="label: proceed even if the estimate exceeds the budget")
+    p.add_argument("--verbose", action="store_true")
+    p.add_argument("--n", type=int, default=60, help="rate: how many held-out pairs you rate")
+    p.add_argument("--port", type=int, default=8765, help="rate: local port")
     p.add_argument("--seed", type=int, default=0)
 
     p = sub.add_parser("guided")
@@ -378,6 +397,30 @@ def main(argv=None) -> int:
                    if r["group"] == "catalogue"]
             guided.check(out, {n: mk(n) for n in names}, js["config"]["prompt"], cat, seed=a.seed)
             return 0
+
+    if a.cmd == "pool":
+        from . import pool
+        out = Path(a.out or runs / "pool")
+        if a.action == "build":
+            pool.build(out, Path(a.survey or runs / "found-survey-v2"), Path(a.archive or runs / "expA2-explore"), shape,
+                       n_chan=a.n_chan, per_lineage=a.per_lineage, seed=a.seed)
+            print(f"built: {out} (look at sheet_chan.png and sheet_search.png)")
+            return 0
+        if a.action == "label":
+            from .config import REPO_ROOT
+            from .judge import Judge, load_env
+            load_env(REPO_ROOT / ".env")
+            jc = cfg["judges"]
+            judge = Judge(a.judge, {**jc.get("defaults", {}), **jc[a.judge]}, resolve(cfg, "judge_cache"), yes=a.yes,
+                          verbose=a.verbose)
+            pool.label(out, judge, a.prompt, a.split, a.limit)
+            return 0
+        if a.action == "rate":
+            from .vlmtest import rate
+            rate(out, n=a.n, port=a.port, source="pairs_heldout.json", question=pool.QUESTION)
+            return 0
+        pool.report(out)
+        return 0
 
     if a.cmd == "vlmtest":
         from . import vlmtest

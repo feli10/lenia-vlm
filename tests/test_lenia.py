@@ -398,3 +398,39 @@ def test_cli_explore_from_found(tmp_path):
     assert rc == 0 and (tmp_path / "e" / "summary.json").exists()
     s = json.loads((tmp_path / "e" / "summary.json").read_text())
     assert s["texture"]["max_loss"] == 0.03
+
+
+def test_pool_end_to_end(tmp_path):
+    """pool build -> label (fake judge) -> rate server on held-out pairs -> report."""
+    import urllib.request
+    from lenia import found, pool
+    from lenia.explore import explore
+    from lenia.judge import Judge
+    o = seeds.donors()["O2u"]["cells"]
+    recs = [{"code": c, "name": c, "params": [{"R": 13, "T": 10, "b": "1", "m": m, "s": 0.015, "kn": 1, "gn": 1}], "cells": o}
+            for c, m in (("A", 0.15), ("B", 0.151), ("C", 0.149), ("D", 0.152))]
+    (tmp_path / "996.json").write_text("".join(json.dumps(r) for r in recs))
+    cs = found.load(tmp_path, ["996"], target_R=13, log=lambda *_: None)
+    found.survey(cs, tmp_path / "s", SHAPE, Thresholds(), time_units=12, rescale_time=6, log=lambda *_: None)
+    roots, desc = found.roots_from_survey(tmp_path / "s", n=2)
+    explore(roots, tmp_path / "e", None, SHAPE, Thresholds(), evals=8, children_per_gen=4, child_time=4, confirm_time=6,
+            rescale_time=0, workers=1, ref_desc=desc, log=lambda *_: None)
+    s = pool.build(tmp_path / "p", tmp_path / "s", tmp_path / "e", SHAPE, n_chan=4, per_lineage=3, heldout=0.5,
+                   pairs_train=2, pairs_heldout=2, time=8, log=lambda *_: None)
+    assert s["creatures"] >= 4 and s["pairs_heldout"] >= 1
+    j = Judge("fake", {"backend": "fake"}, tmp_path / "cache.sqlite", log=lambda *_: None)
+    pool.label(tmp_path / "p", j, "curate", "all", log=lambda *_: None)
+    j2 = Judge("fake2", {"backend": "fake", "fake_noise": 0.3}, tmp_path / "cache.sqlite", log=lambda *_: None)
+    pool.label(tmp_path / "p", j2, "curate", "heldout", log=lambda *_: None)
+    from lenia.vlmtest import make_server
+    import threading
+    srv = make_server(tmp_path / "p", n=2, port=0, source="pairs_heldout.json", question=pool.QUESTION)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    p = json.loads(urllib.request.urlopen(url + "/pairs").read())["todo"][0]
+    urllib.request.urlopen(urllib.request.Request(url + "/vote", data=json.dumps({**p, "choice": "left"}).encode(),
+                                                  headers={"Content-Type": "application/json"}))
+    srv.shutdown()
+    r = pool.report(tmp_path / "p", log=lambda *_: None)
+    assert "fake/curate" in r["per_judge_prompt"] and r["human"]["rated"] == 1
+    assert any(set(k.split(" vs ")) == {"fake/curate", "fake2/curate"} for k in r["agreement"])
