@@ -1,0 +1,5 @@
+# Double resolution (Experiment A): kernel radius 26 in a 256x256 world. Merge over the defaults:
+#   lenia --config configs/r26.yaml <command>
+world:
+  size: [256, 256]
+  R: 26

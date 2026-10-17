@@ -13,7 +13,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from .alive import Thresholds, Tracker
-from .sim import Batch, Rule
+from .backend import make_batch, to_device, to_numpy
+from .sim import Rule
 
 
 @dataclass
@@ -61,9 +62,10 @@ def run_batch(rules: list, inits: np.ndarray, shape, hz: Horizon, th: Thresholds
     thumb = int(round(hz.thumb_every * T)) if hz.thumb_every else 0
     film_steps = set(np.linspace(steps - hz.film_span * T, steps, hz.frames).round().astype(int).tolist())
     count_at = set(range(steps - 4 * rec, steps + 1, 2 * rec))     # count bodies near the end only
-    full = Batch(rules, shape)
+    full = make_batch(rules, shape)
     b = full
-    A = inits.astype(np.float32).copy()
+    A = to_device(inits.astype(np.float32).copy())
+    An = None                                     # numpy copy of A for the current step (recording only)
     active = list(range(len(rules)))             # positions in `rules` still running
     trackers = [Tracker(r.R, shape, th) for r in rules]
     films = [[] for _ in rules]
@@ -72,13 +74,14 @@ def run_batch(rules: list, inits: np.ndarray, shape, hz: Horizon, th: Thresholds
     for k in range(steps + 1):
         t = k / T
         if k % rec == 0 or k in film_steps or (thumb and k % thumb == 0):
+            An = to_numpy(A)
             for pos, i in enumerate(active):
                 if k % rec == 0:
-                    trackers[i].add(t, A[pos], count_components=(k in count_at))
+                    trackers[i].add(t, An[pos], count_components=(k in count_at))
                 if k in film_steps:
-                    films[i].append((t, A[pos].astype(np.float16)))
+                    films[i].append((t, An[pos].astype(np.float16)))
                 if thumb and k % thumb == 0:
-                    thumbs[i].append((t, thumbnail(A[pos], hz.thumb_px)))
+                    thumbs[i].append((t, thumbnail(An[pos], hz.thumb_px)))
         if stop and k % stop == 0 and 0 < k < steps:
             keep = []
             for pos, i in enumerate(active):
@@ -89,7 +92,7 @@ def run_batch(rules: list, inits: np.ndarray, shape, hz: Horizon, th: Thresholds
                        else "spread" if spread_hits[i] >= 2 else None)
                 if why:
                     tr.forced = why
-                    films[i] = [(t, A[pos].astype(np.float16))]
+                    films[i] = [(t, to_numpy(A[pos:pos + 1])[0].astype(np.float16))]
                 else:
                     keep.append(pos)
             if len(keep) < len(active):

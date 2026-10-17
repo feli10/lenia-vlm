@@ -2,6 +2,7 @@
 
 paths:
   runs_dir: runs
+  judge_cache: runs/judge_cache.sqlite  # every VLM answer, keyed by model, prompt text and images
   catalogue: data/animals.json   # Chan's catalogue; see src/lenia/catalogue.py for the download
 
 world:
@@ -46,5 +47,38 @@ render:
   crop_r: 3.0                          # crop around the creature, in kernel radii
 
 run:
-  workers: 0                           # 0 = all cores but one
-  batch: 16                            # rollouts stepped together
+  backend: numpy                       # numpy | auto | cuda | mps | cpu (PyTorch); `lenia --backend auto` on Colab
+  workers: 0                           # 0 = all cores but one (CPU); on a GPU always 1
+  batch: 16                            # rollouts stepped together (CPU)
+  batch_gpu: 64                        # ... on a GPU
+
+judges:                                # VLM judges for `lenia vlmtest run` (keys in .env)
+  defaults:
+    max_workers: 8
+    max_retries: 6
+    timeout_s: 120
+    budget_usd: 2.0                    # a run estimated above this stops and asks for --yes
+  luna:
+    backend: decisions                 # OpenRouter Decisions API: soft probabilities, deterministic
+    model: openai/gpt-6-luna-decisions
+    est_cost_per_call_usd: 0.0001      # vscene measured $0.00005 for two 512x320 images; ours are 648x648
+  jev:
+    backend: jev                       # TypeSafe System One; image input is experimental
+    model: jev-latest                  # jev-preview = newest release
+    est_cost_per_call_usd: 0.00001
+    max_workers: 4
+  fake:
+    backend: fake                      # offline, for tests and dry runs
+    fake_position_bias: 0.3
+    fake_noise: 0.5
+
+guided:                                # `lenia guided run | check | rate | gif`
+  founders_from: explore-multikernel   # coherent creatures from the search with the resolution check
+  lineages: 16
+  generations: 50
+  judge: luna                          # drives the search (best match to Felix's ratings with 'curate')
+  heldout: jev                         # never sees the search; used by `check`
+  prompt: curate
+  threshold: 0.6                       # child replaces parent if P(child preferred), both orders averaged, >= this
+  mut_scale: 1.0
+  attempts: 3                          # mutants a lineage may try per generation until one passes the constraints

@@ -155,6 +155,54 @@ class Batch:
         return np.clip(A + self.dt * D / self.hsum, 0.0, 1.0).astype(np.float32)
 
 
+GROWTH_TORCH = {
+    1: lambda t, u, m, s: t.clamp(1 - (u - m) ** 2 / (9 * s ** 2), min=0) ** 4 * 2 - 1,
+    2: lambda t, u, m, s: t.exp(-((u - m) ** 2) / (2 * s ** 2)) * 2 - 1,
+    3: lambda t, u, m, s: ((u - m).abs() <= s).to(u.dtype) * 2.0 - 1,
+}
+
+
+class TorchBatch:
+    """Batch on PyTorch (GPU): the same update, line for line. Worlds are (B, C, H, W) float32 tensors
+    on `device`; use backend.to_device / to_numpy to move them."""
+
+    def __init__(self, rules: list, shape=(128, 128), device: str = "cuda"):
+        import torch
+        assert len({r.structure() for r in rules}) == 1, "a batch needs rules with the same structure"
+        self.t, self.device = torch, device
+        self.rules, self.shape = rules, tuple(shape)
+        r0 = rules[0]
+        self.C, self.K = r0.channels, len(r0.kernels)
+        self.c0 = torch.tensor([k.c0 for k in r0.kernels], dtype=torch.long, device=device)
+        self.c1 = torch.tensor([k.c1 for k in r0.kernels], dtype=torch.long, device=device)
+        self.gn = r0.gn
+        kf = np.stack([np.fft.rfft2(kernel_fields(r, shape)) for r in rules]).astype(np.complex64)
+        self.kf = torch.from_numpy(kf).to(device)
+        par = lambda a: torch.tensor([[getattr(k, a) for k in r.kernels] for r in rules], dtype=torch.float32,
+                                     device=device)[:, :, None, None]
+        self.m, self.s, self.h = par("m"), par("s"), par("h")
+        self.dt = torch.tensor([1.0 / r.T for r in rules], dtype=torch.float32, device=device)[:, None, None, None]
+        hsum = torch.zeros(len(rules), self.C, dtype=torch.float32, device=device)
+        hsum.index_add_(1, self.c1, self.h[:, :, 0, 0])
+        self.hsum = hsum.clamp(min=1e-12)[:, :, None, None]
+
+    def subset(self, idx) -> "TorchBatch":
+        b = copy.copy(self)
+        idx_t = self.t.as_tensor(np.asarray(idx), dtype=self.t.long, device=self.device)
+        b.rules = [self.rules[i] for i in np.asarray(idx)]
+        for k in ("kf", "m", "s", "h", "dt", "hsum"):
+            setattr(b, k, getattr(self, k).index_select(0, idx_t))
+        return b
+
+    def step(self, A):
+        t = self.t
+        Af = t.fft.rfft2(A)                                          # (B, C, H, Wr)
+        U = t.fft.irfft2(self.kf * Af[:, self.c0], s=self.shape)     # (B, K, H, W)
+        G = self.h * GROWTH_TORCH[self.gn](t, U, self.m, self.s)
+        D = t.zeros_like(A).index_add_(1, self.c1, G)
+        return (A + self.dt * D / self.hsum).clamp_(0.0, 1.0)
+
+
 def place(cells: np.ndarray, shape, C: int = 1) -> np.ndarray:
     """Put a (C, h, w) or (h, w) pattern in the middle of an empty (C, H, W) world."""
     cells = np.asarray(cells, np.float32)

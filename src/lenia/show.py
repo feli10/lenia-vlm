@@ -17,7 +17,8 @@ from PIL import Image, ImageDraw
 from . import render, seeds as seedbank
 from .alive import Thresholds, Tracker
 from .rle import rle2arr
-from .sim import Batch, Rule, place
+from .backend import make_batch, to_device, to_numpy
+from .sim import Rule, place
 
 
 def clips_from_run(run: Path, ids: list | None = None, alive_only: bool = False, seed: int | None = None,
@@ -73,19 +74,21 @@ def simulate(clips: list, shape=(128, 128), time: float = 50.0, every: int = 2, 
     for ks in groups.values():
         rules = [clips[k][1] for k in ks]
         T = rules[0].T
-        b = Batch(rules, shape)
-        A = np.stack([_init(clips[k][2], clips[k][1], shape) for k in ks]).astype(np.float32)
+        b = make_batch(rules, shape)
+        A = to_device(np.stack([_init(clips[k][2], clips[k][1], shape) for k in ks]).astype(np.float32))
         trackers = [Tracker(r.R, shape, th) for r in rules]
         frames = [[] for _ in ks]
         steps = int(round(time * T))
         rec = max(1, int(round(0.5 * T)))
         for s in range(steps + 1):
+            if s % every == 0 or s % rec == 0:
+                An = to_numpy(A)
             if s % every == 0:
                 for i in range(len(ks)):
-                    frames[i].append((s / T, A[i].astype(np.float16)))
+                    frames[i].append((s / T, An[i].astype(np.float16)))
             if s % rec == 0:
                 for i, tr in enumerate(trackers):
-                    tr.add(s / T, A[i], count_components=(s == steps))
+                    tr.add(s / T, An[i], count_components=(s == steps))
             if s < steps:
                 A = b.step(A)
         for i, k in enumerate(ks):

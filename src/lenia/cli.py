@@ -1,4 +1,4 @@
-"""lenia: is Lenia a good domain for VLM-judged aesthetics? (Phase 0-1: no VLM calls yet)
+"""lenia: is Lenia a good domain for VLM-judged aesthetics?
 
   orbium     sanity check: Orbium from its catalogued pattern should glide (class 'mover')
   catalogue  run Chan's species from their own pattern (--start own) or from the seed bank (--start bank)
@@ -8,6 +8,11 @@
   explore    mobility test: novelty search over rules (no VLM) from a survey's survivors; does it
              move away from where it starts, and outside Chan's catalogue?
   trace      plot rollouts over time (mass, size, speed; thumbnails) from a run's traces.npz
+  vlmtest    early VLM test: build a creature set, ask judges (Luna, Jev) about pairs under several
+             prompts, rate pairs yourself, report (build | run | rate | report); `run` needs API keys in .env
+  guided     VLM-guided search: a judge (Luna, prompt 'curate') accepts mutations it prefers, under the
+             alive + resolution constraints (run | check | rate | gif); needs API keys in .env
+  bench      check the GPU simulator against numpy and time both (use with --backend auto)
   show       animated GIF of rules: from a survey (--run, --rules or --alive), from Chan's catalogue
              (--chan O2u,S1s) or a rule given as JSON (--rule); the camera follows the creature
 
@@ -33,6 +38,8 @@ def _common(cfg):
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="lenia", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", help="YAML merged over configs/lenia.yaml")
+    ap.add_argument("--backend", help="numpy | auto | cuda | mps | cpu (default: configs/lenia.yaml run.backend)")
+    ap.add_argument("--runs", help="results folder (default: configs/lenia.yaml paths.runs_dir), e.g. on Google Drive")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("orbium")
@@ -99,12 +106,56 @@ def main(argv=None) -> int:
     p.add_argument("--cmap", help="override render.cmap")
     p.add_argument("--out", help="output .gif")
 
+    p = sub.add_parser("vlmtest")
+    p.add_argument("action", choices=["build", "run", "rate", "report"])
+    p.add_argument("--out", help="test folder (default runs/vlmtest)")
+    p.add_argument("--judges", default="luna,jev", help="comma-separated names from configs/lenia.yaml: judges")
+    p.add_argument("--prompts", default=",".join(["appeal", "appeal_bare", "beautiful", "curate", "interesting", "lifelike"]),
+                   help="comma-separated prompt ids (src/lenia/prompts.py); default: the prompt sweep")
+    p.add_argument("--n", type=int, default=60, help="rate: how many pairs you rate")
+    p.add_argument("--port", type=int, default=8765, help="rate: local port")
+    p.add_argument("--limit", type=int, help="run: only the first N pairs (smoke test)")
+    p.add_argument("--yes", action="store_true", help="run: proceed even if the estimate exceeds the budget")
+    p.add_argument("--verbose", action="store_true", help="run: print every failed call")
+    p.add_argument("--seed", type=int, default=0)
+
+    p = sub.add_parser("guided")
+    p.add_argument("action", choices=["run", "check", "rate", "gif"])
+    p.add_argument("--out", help="run folder (default runs/guided)")
+    p.add_argument("--from", dest="from_run", help="explore run to take founders from (default runs/explore-multikernel)")
+    p.add_argument("--lineages", type=int)
+    p.add_argument("--generations", type=int)
+    p.add_argument("--judge", help="driving judge (configs/lenia.yaml: judges)")
+    p.add_argument("--prompt")
+    p.add_argument("--threshold", type=float)
+    p.add_argument("--heldout", help="check: comma-separated judges (default: driver + held-out)")
+    p.add_argument("--yes", action="store_true")
+    p.add_argument("--workers", type=int)
+    p.add_argument("--seed", type=int, default=0)
+
+    p = sub.add_parser("bench")                 # GPU check: correctness against numpy, then speed
+
     a = ap.parse_args(argv)
     cfg = load(a.config)
+    from . import backend
+    backend.configure(a.backend or cfg["run"].get("backend", "numpy"))
+    if a.runs:
+        cfg["paths"]["runs_dir"] = a.runs
+    if backend.is_gpu():                        # one process, big batches (worker processes would each grab the GPU)
+        cfg["run"]["workers"] = 1
+        cfg["run"]["batch"] = int(cfg["run"].get("batch_gpu", 64))
+        if getattr(a, "workers", None):
+            a.workers = 1
+    if a.cmd != "bench":
+        print(f"[lenia] backend: {backend.info()}", file=sys.stderr)
     shape, hz, th = _common(cfg)
     rc = cfg["render"]
     runs = resolve(cfg, "runs_dir")
     stamp = time.strftime("%Y%m%d-%H%M%S")
+
+    if a.cmd == "bench":
+        from .bench import run as bench
+        return 0 if bench() else 1
 
     if a.cmd == "orbium":
         import numpy as np
@@ -219,6 +270,78 @@ def main(argv=None) -> int:
         show.gif(sims, out, px=px, cols=a.cols, cmap=a.cmap or rc["cmap"], follow=not a.full,
                  crop_r=rc["crop_r"], fps=a.fps, start=a.start)
         print(f"gif: {out}")
+        return 0
+
+    if a.cmd == "guided":
+        from . import guided
+        g = cfg["guided"]
+        out = Path(a.out or runs / "guided")
+        if a.action == "rate":
+            from .vlmtest import rate
+            if not (out / "human_pairs.json").exists():
+                print("run `lenia guided check` first (it picks the pairs to rate)")
+                return 1
+            rate(out, port=8765)
+            return 0
+        if a.action == "gif":
+            print(f"gif: {guided.gif(out, shape)}")
+            return 0
+        from .config import REPO_ROOT
+        from .judge import Judge, load_env
+        load_env(REPO_ROOT / ".env")
+        jc = cfg["judges"]
+        mk = lambda n: Judge(n, {**jc.get("defaults", {}), **jc[n]}, resolve(cfg, "judge_cache"), yes=a.yes)
+        prompt = a.prompt or g["prompt"]
+        if a.action == "run":
+            import numpy as np
+            src = Path(a.from_run or runs / g["founders_from"])
+            n_lin = a.lineages or g["lineages"]
+            founders = guided.pick_founders(src, n_lin + 8, seed=a.seed)     # spares: some may fail the 2x check now
+            guided.run(out, founders, mk(a.judge or g["judge"]), prompt, np.load(src / "catalogue_desc.npy"),
+                       generations=a.generations or g["generations"], threshold=a.threshold or g["threshold"],
+                       mut_scale=g.get("mut_scale", 1.0), seed=a.seed, shape=shape,
+                       workers=a.workers if a.workers is not None else cfg["run"]["workers"], th=th,
+                       n_lineages=n_lin, attempts=g.get("attempts", 3))
+            try:
+                print(f"gif: {guided.gif(out, shape)}")
+            except Exception as e:          # pictures are a bonus; never lose a run over them
+                print(f"(gif failed: {e})")
+            print(f"done: {out}; next: lenia guided check")
+            return 0
+        if a.action == "check":
+            import csv as _csv
+            js = __import__("json").loads((out / "state.json").read_text())
+            names = (a.heldout or f"{js['config']['judge']},{g['heldout']}").split(",")
+            vt = runs / "vlmtest"
+            cat = [(r["id"], vt / "images" / f"{r['id']}.png") for r in _csv.DictReader(open(vt / "creatures.csv"))
+                   if r["group"] == "catalogue"]
+            guided.check(out, {n: mk(n) for n in names}, js["config"]["prompt"], cat, seed=a.seed)
+            return 0
+
+    if a.cmd == "vlmtest":
+        from . import vlmtest
+        out = Path(a.out or runs / "vlmtest")
+        if a.action == "build":
+            from . import catalogue
+            cat = catalogue.load(resolve(cfg, "catalogue"), max_R=36, max_size=128)
+            vlmtest.build(out, runs, cat, seed=a.seed)
+            print(f"built: {out} (look at sheet_*.png before running the judges)")
+            return 0
+        if a.action == "rate":
+            vlmtest.rate(out, n=a.n, port=a.port)
+            return 0
+        if a.action == "run":
+            from .config import REPO_ROOT
+            from .judge import Judge, load_env
+            load_env(REPO_ROOT / ".env")
+            jc = cfg["judges"]
+            judges = {n: Judge(n, {**jc.get("defaults", {}), **jc[n]}, resolve(cfg, "judge_cache"), yes=a.yes,
+                               verbose=a.verbose) for n in a.judges.split(",")}
+            path = vlmtest.run(out, judges, a.prompts.split(","), limit=a.limit)
+            print(f"verdicts: {path}; total spent ${sum(j.spent for j in judges.values()):.4f}")
+            if a.limit:
+                return 0
+        vlmtest.report(out)
         return 0
 
     if a.cmd == "survey":
