@@ -477,11 +477,48 @@ batches of 64. `lenia bench` checks PyTorch against numpy (one step to float32 r
 after 30 units) and times both. `--runs DIR` puts all results (and the judge cache) elsewhere, e.g.
 Google Drive. `configs/r26.yaml`: double resolution for Experiment A. Notebook: `colab/lenia_colab.ipynb`.
 
-Verification so far: PyTorch could not be installed in the build sandbox, so the PyTorch code path
-was tested against a numpy-backed stand-in for the PyTorch API (identical results; whole test suite
-passes through it), which checks the logic, not PyTorch itself. The real check is `lenia bench` on
-Colab. CPU reference timings (ms per creature per step, one process): classic 128x128 0.7,
-multikernel 256x256 R=26 5.8, multichannel 256x256 R=26 29.6.
+Verified on Colab (Tesla T4, torch 2.11, 2026-10-17), `lenia --backend auto bench`: PyTorch vs
+numpy one step max difference 2-5e-7 (float32 rounding) in all three setups; Orbium after 30 units
+max cell difference 4.5e-3, mass difference 1.5e-4. ALL CHECKS PASSED.
+
+| ms per creature per step | numpy (1 CPU process) | T4, batch 64 | speedup |
+|---|---|---|---|
+| classic 128x128, R=13 | 0.53 | 0.016 | 33x |
+| multikernel 256x256, R=26 | 6.1 | 0.13 | 47x |
+| multichannel 256x256, R=26 | 30.2 | 0.51 | 60x |
+
+End to end, a 64-rule x 8-seed multikernel survey at R=26 took 38 s on the T4, about 10x the
+2-core build sandbox: the alive classifier and recording still run on the CPU every 5th step, so the
+GPU idles part of the time. Moving those statistics to the GPU is the next speed-up if needed.
+
+**Chan's `found/` collections** (github.com/Chakazul/Lenia, Python/found/, not in animals.json):
+about 3,000 2D creatures with multiple kernels and channels, e.g. 954 three-channel 15-kernel
+creatures (233.json), 752 more (231b.json), 642 (233c.json), plus 2-, 4-, 6- and 7-channel sets.
+Records are concatenated JSON objects in Chan's parameter format, which our simulator reads: a sample
+from 213, 221 and 233 ran correctly, most alive after 30 units. These are the warm starts for
+Experiment A, and a much larger reference set than the 548 classic species.
+
+## Experiment A: multi-channel creatures at higher resolution (2026-10-17, set up)
+
+Question: does a richer substrate (several channels and kernels, larger kernel radius) give more
+varied, more complex coherent creatures than the single-channel R = 13 searches above?
+
+- `lenia found download | survey` (`src/lenia/found.py`): Chan's `found/` files (10 by default: 212,
+  213, 221, 223, 231, 231b, 232, 233, 233c, 233s; 2,589 creatures after removing duplicates; 1,559 of
+  them 3-channel / 15-kernel, 774 3-channel / 9-kernel, plus 1- and 2-channel sets; R from 8 to 41).
+  The survey runs each from its own pattern for 100 units in a 256x256 world (`configs/r26.yaml`),
+  classifies it, and keeps the living ones' final patterns and descriptors (`alive.npz`).
+- `lenia explore --from-found <survey> --roots 64`: novelty search as before (alive at 100, alive
+  at 200, coherent at 2x), started from 64 diverse living found creatures (farthest-point sampling on
+  descriptors), with every living found creature as the reference set ("beyond the reference" now
+  means beyond Chan's multi-channel finds, a much higher bar than the classic catalogue).
+- The search is now resumable: a checkpoint (`checkpoint.pkl`) every 2 minutes; re-running the same
+  command with the same `--out` continues, and a higher `--evals` extends a finished run.
+- Multi-channel creatures render with one channel per RGB primary on black (Chan's convention).
+  Note for the VLM phase: colour is then a confound against single-channel creatures.
+- Caveats: the 2x-coherence threshold (1.98) was calibrated on classic species; recalibrate on
+  found creatures before trusting it there. CPU dry runs (small subset, 128x128) passed; the real
+  runs are on Colab.
 
 ## Open issues (as of 2026-10-17)
 
@@ -550,6 +587,9 @@ uv run lenia vlmtest report                                                 # re
 uv run lenia guided run [--generations 50] [--lineages 16]                 # VLM-guided search (resumable); then:
 uv run lenia guided check                                                   # held-out judges + drift report
 uv run lenia guided rate                                                    # rate founder vs final yourself
+uv run lenia found download                                                 # Chan's found/ collections -> data/found/
+uv run lenia --backend auto --config configs/r26.yaml found survey [--n-per-file 100]   # Experiment A, step 1
+uv run lenia --backend auto --config configs/r26.yaml explore --from-found runs/found-survey --roots 64 --out runs/expA   # step 2 (resumable)
 uv run lenia trace --run runs/survey-classic --rules 18,141            # a rollout's future: mass, size, speed, thumbnails
 uv run python scripts/calibrate_growth.py <explore runs...>           # growth-threshold calibration
 uv run python scripts/calibrate_rescale.py                            # resolution-check calibration (catalogue)

@@ -40,6 +40,8 @@ uv run lenia vlmtest run                              # all pairs, both orders, 
 uv run lenia vlmtest rate                             # rate 60 pairs yourself in the browser
 uv run lenia guided run                               # VLM-guided search: Luna accepts mutations it prefers
 uv run lenia guided check                             # held-out judges, drift, then `lenia guided rate`
+uv run lenia found download                           # Chan's ~2,600 multi-channel creatures (Experiment A)
+uv run lenia --backend auto --config configs/r26.yaml found survey
 ```
 
 Every command and what it writes: `docs/lenia.md` (Commands). Settings: `configs/lenia.yaml`.
@@ -53,7 +55,7 @@ src/lenia/     sim.py (batched Lenia: numpy Batch, PyTorch TorchBatch), backend.
                explore.py (novelty search + 200-unit and 2x-resolution checks), describe.py,
                catalogue.py, show.py, trace.py, render.py, cli.py,
                judge.py (Luna via OpenRouter, Jev via TypeSafe; cached), prompts.py, vlmtest.py,
-               guided.py (VLM-guided search and its held-out check)
+               guided.py (VLM-guided search and its held-out check), found.py (Chan's found/ creatures)
 configs/       lenia.yaml; r26.yaml (double resolution: R = 26, 256x256)
 colab/         lenia_colab.ipynb
 scripts/       calibrations (growth, resolution) and the cross-check against Chan's code

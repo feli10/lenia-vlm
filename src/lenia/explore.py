@@ -176,10 +176,97 @@ def roots_from_survey(run: Path) -> list:
     return [(f"{run.name}#{i}", Rule.from_dict(json.loads(rows[i]["json"])), int(rows[i]["best_seed"])) for i in ids]
 
 
+def _cells3(c) -> np.ndarray:
+    c = np.asarray(c, np.float32)
+    return c if c.ndim == 3 else c[None]
+
+
+def _root_init(j, rule: Rule, shape) -> np.ndarray:
+    """A root starts from a seed of the bank (j = index) or from its own pattern (j = array)."""
+    if isinstance(j, np.ndarray):
+        return _cells3(j)
+    return seedbank.make(seedbank.DEFAULT_BANK[j], rule.R, shape, rule.channels)
+
+
+def coherent_with(space, d1, res2, max_dist):
+    c, d2 = res2
+    if c not in ALIVE or d2 is None:
+        return False, np.inf
+    dist = float(space.dist(d1, np.asarray(d2)[None])[0])
+    return dist <= max_dist, dist
+
+
+def _setup(roots, catalogue, shape, hz_root, hz_child, th, ex, batch, rescale_time, rescale_factor, ref_desc,
+           coherent_factory, log):
+    """Roots (alive and, with rescale_time, coherent) and the descriptor space (reference set + roots)."""
+    rr = evaluate([r for _, r, _ in roots], [_root_init(j, r, shape) for _, r, j in roots], shape, hz_root, th, ex, batch)
+    arch = []
+    for (lab, rule, j), (st, pat, d) in zip(roots, rr):
+        if pat is None:
+            continue
+        arch.append({"id": len(arch), "parent": -1, "root": len(arch), "gen": 0, "label": lab, "rule": rule,
+                     "trace": st.pop("_trace", None), "init": _root_init(j, rule, shape), "final": pat,
+                     "stats": st, "desc": d, "novelty": np.nan, "rescale_dist": np.nan})
+    n_roots_alive = len(arch)
+    root_scale = (rescale_check([a["rule"] for a in arch], [a["final"] for a in arch], shape, th, ex, batch,
+                                rescale_factor, rescale_time) if rescale_time and arch else None)
+    cat_desc = np.zeros((0, len(NAMES)), np.float32)
+    if ref_desc is not None:
+        cat_desc = np.asarray(ref_desc, np.float32).reshape(-1, len(NAMES))
+        log(f"reference set: {len(cat_desc)} precomputed descriptors")
+    elif catalogue:
+        cr = evaluate([s["rule"] for s in catalogue], [_cells3(s["cells"]) for s in catalogue], shape, hz_child, th, ex, batch)
+        cat_desc = np.array([d for _, _, d in cr if d is not None], np.float32).reshape(-1, len(NAMES))
+        log(f"reference set: {len(cat_desc)} of {len(catalogue)} alive and described")
+    for a in arch:      # roots: noise floor = distance between the descriptor over [40, 45] and over [45, 50]
+        ds = a["stats"].pop("desc_half_gap")
+        a["desc_halves"] = (ds[:6].mean(0), ds[6:].mean(0))
+    if not arch:
+        raise SystemExit("no living roots")
+    space = Space(np.concatenate([cat_desc, np.array([a["desc"] for a in arch])]) if len(cat_desc) else
+                  np.array([a["desc"] for a in arch]))
+    coherent = coherent_factory(space)
+    if root_scale is not None:
+        keep = []
+        for a, r2 in zip(arch, root_scale):
+            ok, a["rescale_dist"] = coherent(a["desc"], r2)
+            a["stats"]["rescale_class"] = r2[0]
+            if ok:
+                keep.append(a)
+        for i, a in enumerate(keep):
+            a["id"] = a["root"] = i
+        arch = keep
+    log(f"roots: {n_roots_alive} of {len(roots)} alive under current thresholds"
+        + (f", {len(arch)} of them also coherent at {rescale_factor}x resolution" if rescale_time else ""))
+    if not arch:
+        raise SystemExit("no living roots that are coherent at the finer grid")
+    space.cat_desc, space.n_roots_alive = cat_desc, n_roots_alive
+    return arch, space
+
+
+def _save_checkpoint(path: Path, state: dict) -> None:
+    import pickle
+    tmp = Path(str(path) + ".tmp")
+    with open(tmp, "wb") as f:
+        pickle.dump(state, f, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(tmp, path)
+
+
+def _load_checkpoint(path: Path) -> dict | None:
+    import pickle
+    if not Path(path).exists():
+        return None
+    with open(path, "rb") as f:
+        return pickle.load(f)
+
+
 def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 128), th: Thresholds = None,
             evals: int = 3000, children_per_gen: int = 32, child_time: float = 100.0, confirm_time: float = 200.0, mut_scale: float = 1.0,
             rescale_time: float = 50.0, rescale_factor: int = 2, rescale_max_dist: float = RESCALE_MAX_DIST,
-            k: int = 5, workers: int = 0, batch: int = 16, seed: int = 0, cmap: str = "chan", log=print) -> dict:
+            k: int = 5, workers: int = 0, batch: int = 16, seed: int = 0, cmap: str = "chan",
+            checkpoint_every_s: float = 120.0, ref_desc: np.ndarray | None = None, log=print) -> dict:
+    """ref_desc: descriptors of a reference set (e.g. Chan's found/ creatures from `lenia found survey`), used
+    instead of simulating `catalogue` for the descriptor scale and the 'beyond the reference' measures."""
     th = th or Thresholds()
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -194,38 +281,6 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
     rescale_cost = rescale_time * rescale_factor ** 2 / child_time    # one check, in child-equivalents
     hz_root = Horizon(time=max(child_time, 50.0), record_every=0.5, frames=12, film_span=10.0, thumb_every=0)
 
-    # 1. roots: re-grow each from its best seed, keep the ones that are alive under current thresholds
-    rr = evaluate([r for _, r, _ in roots],
-                  [seedbank.make(seedbank.DEFAULT_BANK[j], r.R, shape, r.channels)[:, ] for _, r, j in roots],
-                  shape, hz_root, th, ex, batch)
-    arch = []   # archive members (dicts)
-    for (lab, rule, j), (st, pat, d) in zip(roots, rr):
-        if pat is None:
-            continue
-        arch.append({"id": len(arch), "parent": -1, "root": len(arch), "gen": 0, "label": lab, "rule": rule,
-                     "trace": st.pop("_trace", None),
-                     "init": seedbank.make(seedbank.DEFAULT_BANK[j], rule.R, shape, rule.channels), "final": pat,
-                     "stats": st, "desc": d, "novelty": np.nan, "rescale_dist": np.nan})
-    n_roots_alive = len(arch)
-    if rescale_time:   # roots must be coherent too, or the search starts from speckle (judged below)
-        root_scale = rescale_check([a["rule"] for a in arch], [a["final"] for a in arch], shape, th, ex, batch,
-                                   rescale_factor, rescale_time)
-
-    # 2. catalogue reference (descriptor space scale + 'outside the catalogue' test)
-    cat_desc = np.zeros((0, len(NAMES)), np.float32)
-    if catalogue:
-        cr = evaluate([s["rule"] for s in catalogue], [s["cells"][None] for s in catalogue], shape, hz_child, th, ex, batch)
-        cat_desc = np.array([d for _, _, d in cr if d is not None], np.float32)
-        log(f"catalogue: {len(cat_desc)} of {len(catalogue)} species alive and described")
-    for a in arch:      # roots: noise floor = distance between the descriptor over [40, 45] and over [45, 50]
-        ds = a["stats"].pop("desc_half_gap")
-        a["desc_halves"] = (ds[:6].mean(0), ds[6:].mean(0))
-    for x in (cr if catalogue else []):
-        x[0].pop("desc_half_gap", None)
-        x[0].pop("_trace", None)
-    space = Space(np.concatenate([cat_desc, np.array([a["desc"] for a in arch])]) if len(cat_desc) else
-                  np.array([a["desc"] for a in arch]))
-
     def coherent(d1, res2):
         """Alive at the finer grid, and the same creature there: descriptor distance <= rescale_max_dist."""
         c, d2 = res2
@@ -234,32 +289,37 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
         dist = float(space.dist(d1, np.asarray(d2)[None])[0])
         return dist <= rescale_max_dist, dist
 
-    if rescale_time:
-        keep = []
-        for a, r2 in zip(arch, root_scale):
-            ok, a["rescale_dist"] = coherent(a["desc"], r2)
-            a["stats"]["rescale_class"] = r2[0]
-            if ok:
-                keep.append(a)
-        for i, a in enumerate(keep):
-            a["id"] = a["root"] = i
-        arch = keep
-    n_roots = len(arch)
-    log(f"roots: {n_roots_alive} of {len(roots)} alive under current thresholds"
-        + (f", {n_roots} of them also coherent at {rescale_factor}x resolution" if rescale_time else ""))
-    if n_roots == 0:
-        raise SystemExit("no living roots" + (" that are coherent at the finer grid" if rescale_time and n_roots_alive else ""))
-    D = lambda: np.array([a["desc"] for a in arch])
-    nn0 = [np.sort(space.dist(a["desc"], D()))[1] for a in arch] if n_roots > 1 else [1.0]
-    tau = 0.5 * float(np.median(nn0))
-    noise = float(np.median([space.dist(a["desc_halves"][0], a["desc_halves"][1][None])[0] for a in arch]))
-    log(f"initial novelty threshold {tau:.2f}; noise floor (a root vs itself 5 time units later) {noise:.2f}")
+    ckpt = out / "checkpoint.pkl"
+    state = _load_checkpoint(ckpt)
+    if state is not None:
+        g = state
+        arch, hist, n_eval, gen, alive_children = g["arch"], g["hist"], g["n_eval"], g["gen"], g["alive_children"]
+        tau, noise, nn0, cat_desc, space, rng = g["tau"], g["noise"], g["nn0"], g["cat_desc"], g["space"], g["rng"]
+        n_late, n_rescale_fail, n_roots, n_roots_alive = g["n_late"], g["n_rescale_fail"], g["n_roots"], g["n_roots_alive"]
+        t0 -= g["elapsed"]
+        log(f"resuming from {ckpt.name}: generation {gen}, {round(n_eval)} evals, archive {len(arch)}")
+    else:
+        arch, space = _setup(roots, catalogue, shape, hz_root, hz_child, th, ex, batch, rescale_time, rescale_factor, ref_desc,
+                             coherent_factory=lambda sp: (lambda d1, r2: coherent_with(sp, d1, r2, rescale_max_dist)), log=log)
+        cat_desc = space.cat_desc
+        n_roots_alive, n_roots = space.n_roots_alive, len(arch)
+        D = lambda: np.array([a["desc"] for a in arch])
+        nn0 = [np.sort(space.dist(a["desc"], D()))[1] for a in arch] if n_roots > 1 else [1.0]
+        tau = 0.5 * float(np.median(nn0))
+        noise = float(np.median([space.dist(a["desc_halves"][0], a["desc_halves"][1][None])[0] for a in arch]))
+        log(f"initial novelty threshold {tau:.2f}; noise floor (a root vs itself 5 time units later) {noise:.2f}")
+        hist, n_eval, gen, alive_children = [], 0, 0, []
+    last_save = time.time()
 
-    # 3. novelty search
-    hist = []
-    n_eval = 0
-    gen = 0
-    alive_children = []   # every living child (archived or not), for 'where does mutation go'
+    def save():
+        _save_checkpoint(ckpt, {"arch": arch, "hist": hist, "n_eval": n_eval, "gen": gen, "alive_children": alive_children,
+                                "tau": tau, "noise": noise, "nn0": nn0, "cat_desc": cat_desc, "space": space, "rng": rng,
+                                "n_late": n_late, "n_rescale_fail": n_rescale_fail, "n_roots": n_roots,
+                                "n_roots_alive": n_roots_alive, "elapsed": time.time() - t0})
+    if state is None:
+        save()
+    D = lambda: np.array([a["desc"] for a in arch])
+    # 3. novelty search (alive_children: every living child, archived or not, for 'where does mutation go')
     while n_eval < evals:
         gen += 1
         parents = [arch[i] for i in rng.integers(len(arch), size=children_per_gen)]
@@ -323,6 +383,9 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
                      "failed_rescale": n_failed_scale,
                      "archive": len(arch),
                      "tau": round(tau, 3), "classes": classes})
+        if time.time() - last_save > checkpoint_every_s or n_eval >= evals:
+            save()
+            last_save = time.time()
         if gen % 10 == 0 or n_eval >= evals:
             log(f"  gen {gen}: {round(n_eval)} evals, alive {n_alive}/{len(kids)}, candidates {n_cand}, failed {rescale_factor}x {n_failed_scale}, added {n_added}, archive {len(arch)}, "
                 f"tau {tau:.2f}, {time.time() - t0:.0f}s")

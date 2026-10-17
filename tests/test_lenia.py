@@ -309,3 +309,30 @@ def test_torch_backend_matches_numpy():
         assert res[0].stats["class"] == "mover"
     finally:
         backend.configure("numpy")
+
+
+def test_found_parse_and_load(tmp_path):
+    """Chan's found/ format: concatenated JSON objects; multi-channel cells are one RLE string per channel."""
+    from lenia import found
+    o = seeds.donors()["O2u"]["cells"]
+    one = {"code": "A", "name": "orbium", "params": [{"R": 13, "T": 10, "b": "1", "m": 0.15, "s": 0.015, "kn": 1, "gn": 1}],
+           "cells": o}
+    two = {"code": "B", "name": "two", "params": [
+        {"R": 13, "T": 10, "b": "1", "m": 0.15, "s": 0.015, "h": 1, "r": 1, "kn": 1, "gn": 1, "c": [0, 0]},
+        {"R": 13, "T": 10, "b": "1", "m": 0.15, "s": 0.015, "h": 1, "r": 1, "kn": 1, "gn": 1, "c": [1, 1]}],
+        "cells": [o, o]}
+    (tmp_path / "999.json").write_text(json.dumps(one) + "\n" + json.dumps(two) + json.dumps(one))   # last is a duplicate
+    cs = found.load(tmp_path, ["999"], log=lambda *_: None)
+    assert len(cs) == 2 and cs[0]["cells"].shape == (1, 20, 20) and cs[1]["cells"].shape == (2, 20, 20)
+    assert cs[1]["rule"].channels == 2
+
+
+def test_explore_resumes(tmp_path):
+    from lenia.explore import explore
+    roots = [("orbium", ORBIUM, orbium_cells()[None])]          # a root from its own pattern
+    kw = dict(catalogue=None, shape=SHAPE, children_per_gen=4, child_time=4, confirm_time=6, rescale_time=0, workers=1,
+              log=lambda *_: None)
+    s1 = explore(roots, tmp_path, evals=4, **kw)
+    assert (tmp_path / "checkpoint.pkl").exists()
+    s2 = explore(roots, tmp_path, evals=12, **kw)               # continues the same run
+    assert s2["generations"] > s1["generations"] and s2["evals"] >= 12

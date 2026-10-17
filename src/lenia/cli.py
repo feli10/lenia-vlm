@@ -63,6 +63,9 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("explore")
     p.add_argument("--from", dest="from_runs", help="survey folder(s), comma-separated: roots = their alive rules")
+    p.add_argument("--from-found", help="a `lenia found survey` folder: roots = diverse living found/ creatures "
+                                        "(own patterns), reference set = all of them")
+    p.add_argument("--roots", type=int, default=64, help="with --from-found: how many roots")
     p.add_argument("--evals", type=int, default=3000)
     p.add_argument("--children", type=int, default=32, help="children per generation")
     p.add_argument("--child-time", type=float, default=100.0, help="units of time each child is run for")
@@ -133,6 +136,13 @@ def main(argv=None) -> int:
     p.add_argument("--workers", type=int)
     p.add_argument("--seed", type=int, default=0)
 
+    p = sub.add_parser("found")                 # Chan's found/ collections (multi-kernel, multi-channel)
+    p.add_argument("action", choices=["download", "survey"])
+    p.add_argument("--files", help="comma-separated file names (default: found.DEFAULT)")
+    p.add_argument("--n-per-file", type=int, default=0, help="survey: random subset per file (0 = all)")
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--out")
+
     p = sub.add_parser("bench")                 # GPU check: correctness against numpy, then speed
 
     a = ap.parse_args(argv)
@@ -152,6 +162,33 @@ def main(argv=None) -> int:
     rc = cfg["render"]
     runs = resolve(cfg, "runs_dir")
     stamp = time.strftime("%Y%m%d-%H%M%S")
+
+    if a.cmd == "found":
+        from . import found
+        names = a.files.split(",") if a.files else found.DEFAULT
+        folder = resolve(cfg, "catalogue").parent / "found"
+        if a.action == "download":
+            found.download(names, folder)
+            print(f"files in {folder}")
+            return 0
+        import numpy as np
+        cs = found.load(folder, names, max_size=min(shape) // 2)
+        if a.n_per_file:
+            rng = np.random.default_rng(a.seed)
+            keep = []
+            for n in names:
+                idx = [i for i, c in enumerate(cs) if c["file"] == n]
+                keep += [idx[i] for i in sorted(rng.choice(len(idx), min(a.n_per_file, len(idx)), replace=False))]
+            cs = [cs[i] for i in sorted(keep)]
+        out = Path(a.out or runs / "found-survey")
+        from concurrent.futures import ProcessPoolExecutor
+        w = cfg["run"]["workers"] or max(1, (__import__("os").cpu_count() or 2) - 1)
+        ex = ProcessPoolExecutor(w) if w > 1 else None
+        print(f"{len(cs)} creatures -> {out}")
+        found.survey(cs, out, shape, th, batch=cfg["run"]["batch"], ex=ex)
+        if ex:
+            ex.shutdown()
+        return 0
 
     if a.cmd == "bench":
         from .bench import run as bench
@@ -211,11 +248,17 @@ def main(argv=None) -> int:
         return 0
 
     if a.cmd == "explore":
-        if not a.from_runs:
-            print("explore needs --from (or --replot)")
+        if not a.from_runs and not a.from_found:
+            print("explore needs --from or --from-found (or --replot)")
             return 1
         from .explore import explore, roots_from_survey
-        roots = [r for f in a.from_runs.split(",") for r in roots_from_survey(Path(f))]
+        ref_desc = None
+        if a.from_found:
+            from .found import roots_from_survey as found_roots
+            roots, ref_desc = found_roots(Path(a.from_found), a.roots, seed=a.seed)
+            a.no_catalogue = True                   # the found creatures are the reference set
+        else:
+            roots = [r for f in a.from_runs.split(",") for r in roots_from_survey(Path(f))]
         cat = None
         path = resolve(cfg, "catalogue")
         if not a.no_catalogue:
@@ -224,14 +267,14 @@ def main(argv=None) -> int:
                 cat = catalogue.load(path)
             else:
                 print(f"(no catalogue at {path}: skipping the catalogue comparison)")
-        name = "-".join(Path(f).name for f in a.from_runs.split(","))
-        out = Path(a.out or runs / f"explore-{name}-{stamp}")
+        name = "-".join(Path(f).name for f in (a.from_runs or a.from_found).split(","))
+        out = Path(a.out or runs / f"explore-{name}-{stamp}")   # give --out to resume an interrupted run
         print(f"{len(roots)} roots -> {out}")
         explore(roots, out, cat, shape, th, evals=a.evals, children_per_gen=a.children, child_time=a.child_time,
                 confirm_time=a.confirm_time, rescale_time=a.rescale_time, rescale_factor=a.rescale_factor,
                 **({"rescale_max_dist": a.rescale_max_dist} if a.rescale_max_dist is not None else {}),
                 mut_scale=a.mut_scale, workers=a.workers if a.workers is not None else cfg["run"]["workers"],
-                batch=cfg["run"]["batch"], seed=a.seed, cmap=rc["cmap"])
+                batch=cfg["run"]["batch"], seed=a.seed, cmap=rc["cmap"], ref_desc=ref_desc)
         print(f"results: {out}")
         return 0
 
