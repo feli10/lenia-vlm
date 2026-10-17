@@ -520,11 +520,78 @@ varied, more complex coherent creatures than the single-channel R = 13 searches 
   found creatures before trusting it there. CPU dry runs (small subset, 128x128) passed; the real
   runs are on Colab.
 
+### Results (Colab T4, 2026-10-17)
+
+Survey (100 per file, 620 run): 192 alive by our checks (31%; classic catalogue 84%). By file:
+212 19/44, 213 50/88, 221 23/40, 223 9/21, 231 3/23, 231b 8/100, 232 1/63, 233 35/100, 233c 27/100,
+233s 27/41. The rest: frozen 120, spread 104, multi 72, fizzled 70. Some of these are our narrower
+definition (a record in 231 is named "stable stationary"; multi may include splitting creatures).
+Visually the living ones are far richer than the classic searches: internal structure, several
+coloured parts, rings, lobes, chains (`sheet_233.png`, `sheet_233s.png`). The substrate passes.
+
+Search (38 roots: 64 picked, 50 alive, 38 coherent at 2x; 3,222 evaluations, 61 generations, 33 min):
+archive 204 and still growing linearly; children alive 51%; drift from root median 2.6 (noise floor
+0.63), max 13.2; 27% of children beyond the reference set's p90 nearest-neighbour distance.
+
+But the novelty is concentrated. 166 children, of which 26 from one root (231b:LQRNVH) and 20 from
+221:#9. Of the 40 children farthest from the reference set, 16 are that one 231b lineage: a creature
+whose green channel forms a labyrinth of stripes 1 to 2 cells wide. That root is the only one at
+R = 12 (roots keep Chan's own R: 14 of 38 at R = 20, 1 at 12), and it and its descendants are the 23
+highest-frequency patterns in the archive (power at wavelengths under 4 cells: 0.20 at the root, up to
+0.32 in descendants; archive median 0.03). Another 14 of the 40 are single-channel 212 lineages
+(rendered on white, so they also look different for a trivial reason). Other clearly new forms: the
+spiky star from 221:#9 (#173), a four-lobed 212 (#90), the 233:M3R6NK lineage.
+
+**Is the labyrinth a grid artifact? No (checked).** At first it looked like speckle again. Re-run at
+R = 26 (rule scaled, pattern resampled, 30 units), #146 and its root keep the labyrinth, and the
+stripes widen with R, from about 2 cells to 4-5. Measured in units of R the fine structure is
+unchanged: the share of power at wavelengths under R/3 is 0.309 at R = 12 and 0.322 at R = 26 for
+#146 (root: 0.204 and 0.208; the spiky star #173, R = 38 to 26: 0.044 and 0.031). Structure that
+scales with the kernel is real Lenia structure, not grid noise. So the family is a genuine
+striped-skin creature that the descriptors happen to reward heavily (stripes light up the angular
+orders). That makes it a novelty-measure problem (one family dominating), not a validity problem.
+
+Changes for the second run (alive v2, built 2026-10-17; `configs/found.yaml`):
+1. Every found creature at a common R = 20 (`lenia found survey` brings creatures to the config's
+   world.R; pattern resampled, rule R changed). Fine structure is then resolved by 3+ cells, and every
+   creature is rendered at the same scale. Why 20 and not 26: 20 is Chan's own most common R for these
+   files, and at R = 26 17% of the creatures would not fit a 256x256 world (8% at R = 20); a 384x384
+   world would cost 2.3x.
+2. 'Spread' judged by shape, not world size. The first survey called most large creatures spread:
+   64 of 125 creatures 90-128 cells wide, against 0 of 342 under 60. The cause is the occupancy cap
+   (15% of the world, set for small classic creatures), which at R = 20 in 256x256 binds before the
+   R-relative radius-of-gyration cap (2.5 R). `configs/found.yaml` raises it to 25%, just above a disc
+   at the rg cap, so the shape cap decides.
+3. Checks calibrated on the creatures being searched: the survey runs every living creature at 2x
+   and writes `calibration.json` (2x descriptor distance: p95 of those alive at both scales, as for
+   the classic catalogue; texture loss: p99). `explore --from-found` uses it.
+4. A texture-loss term in the 2x check (`explore.texture_loss`): the share of power at wavelengths
+   under 4 cells at R, minus the share under 8 cells at 2R (the same wavelengths in units of R). Real
+   structure keeps its share (the measurement above); grid noise that relaxes at the finer grid loses
+   it. This catches noise that relaxes into a body with the same mass profile, which the
+   descriptor-based check cannot see, without punishing real fine structure the way an absolute
+   texture cap would. Threshold: p99 of Chan's creatures, but never below 0.03 (about the whole
+   fine structure of a median creature): real creatures vary by a few hundredths with phase, grid
+   noise loses 0.1-0.3. `sheet_texture.png` shows the creatures with the most fine structure and
+   those losing the most at 2x.
+5. Roots are drawn only from creatures that pass the calibrated checks (farthest-point sampling
+   otherwise favours outliers, which are the ones that fail: 12 of 50 in the first run).
+6. Multi-channel files only (221, 223, 231, 231b, 232, 233, 233c, 233s): every creature renders as
+   colour on black.
+
+Deferred (novelty, not validity): one family dominating the top of the archive is a property of the
+hand-made descriptors; Experiment B (embedding novelty) or a per-lineage cap would address it. For
+building a labelling pool, sampling stratified by lineage is enough.
+
 ## Open issues (as of 2026-10-17)
 
 **Viability (the 'alive' judge)**
 - Near-static creatures pass as alive (motion/change thresholds 0.02 / 0.05 R per unit); the VLMs and
-  Felix penalise them, but raising the thresholds would close the loophole outright.
+  Felix penalise them. Decision (2026-10-17): leave them legal. "Alive" is physical validity (exists,
+  one body, persists, coherent across resolutions), not taste; whether the aesthetic reward pushes
+  toward motion is then a measurable trade-off rather than a rule hidden in the constraint.
+- Splitting creatures (classed "multi") stay excluded for now: one creature per image keeps pairwise
+  judging clean. A possible later extension.
 - The search piles up just under the 2x-check threshold; a few novel creatures still collapse into one
   shared smooth body at 2x (#23, #144). Options: stricter threshold, a 3x check, or search at higher R.
 - The 2x check rests on a coarse descriptor (about 9% of catalogue species fail it): a filter, not proof.
@@ -588,8 +655,8 @@ uv run lenia guided run [--generations 50] [--lineages 16]                 # VLM
 uv run lenia guided check                                                   # held-out judges + drift report
 uv run lenia guided rate                                                    # rate founder vs final yourself
 uv run lenia found download                                                 # Chan's found/ collections -> data/found/
-uv run lenia --backend auto --config configs/r26.yaml found survey [--n-per-file 100]   # Experiment A, step 1
-uv run lenia --backend auto --config configs/r26.yaml explore --from-found runs/found-survey --roots 64 --out runs/expA   # step 2 (resumable)
+uv run lenia --backend auto --config configs/found.yaml found survey [--n-per-file 100]   # Experiment A: survey + calibration at R = 20
+uv run lenia --backend auto --config configs/found.yaml explore --from-found runs/found-survey --roots 64 --out runs/expA   # step 2 (resumable)
 uv run lenia trace --run runs/survey-classic --rules 18,141            # a rollout's future: mass, size, speed, thumbnails
 uv run python scripts/calibrate_growth.py <explore runs...>           # growth-threshold calibration
 uv run python scripts/calibrate_rescale.py                            # resolution-check calibration (catalogue)

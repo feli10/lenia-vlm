@@ -9,7 +9,9 @@ in) is a candidate; candidates are re-run to confirm_time (default 200), then ru
 resolution (rule R -> 2R, creature upsampled; rescale_time, default 50) and join the archive only if
 alive in both and still novel. The archive keeps the confirmed run's final creature. The resolution
 check removes 'speckle': patterns whose structure lives at the scale of single cells, which novelty
-search otherwise favours and which freeze or die on a finer grid. Roots get the same check.
+search otherwise favours and which freeze or die on a finer grid. With texture_max_loss, candidates must also
+keep their fine structure at the finer grid (`texture_loss`), which catches grid-scale texture that the
+descriptor-based check misses. Roots get the same checks.
 
 Measured: how often mutants stay alive; how far lineages drift from their roots (descriptor and
 parameter space); and how much of the archive lies outside the spread of Chan's catalogue, as
@@ -130,14 +132,15 @@ def evaluate(rules: list, inits: list, shape, hz: Horizon, th: Thresholds, ex, b
 # median 1.44 apart, and a creature vs itself 5 time units later about 0.5-0.8.
 RESCALE_MAX_DIST = 1.98
 
-def upsample(P: np.ndarray, f: int = 2) -> np.ndarray:
-    """(C, h, w) -> (C, f*h, f*w) by bilinear interpolation (cell centres aligned), values kept in [0, 1]."""
+def upsample(P: np.ndarray, f: float = 2) -> np.ndarray:
+    """(C, h, w) -> (C, round(f*h), round(f*w)) by bilinear interpolation (cell centres aligned), values
+    kept in [0, 1]. f need not be an integer, and may be below 1 (used to bring creatures to a common R)."""
     P = np.asarray(P, np.float32)
     P = P[None] if P.ndim == 2 else P
 
     def along(P, ax):
         n = P.shape[ax]
-        x = np.clip((np.arange(n * f) + 0.5) / f - 0.5, 0, n - 1)
+        x = np.clip((np.arange(max(1, int(round(n * f)))) + 0.5) / f - 0.5, 0, n - 1)
         i0 = np.floor(x).astype(int)
         i1 = np.minimum(i0 + 1, n - 1)
         w = (x - i0).reshape([-1 if a == ax % P.ndim else 1 for a in range(P.ndim)])
@@ -146,13 +149,49 @@ def upsample(P: np.ndarray, f: int = 2) -> np.ndarray:
     return np.clip(along(along(P, -2), -1), 0, 1)
 
 
-def rescaled(rule: Rule, f: int = 2) -> Rule:
+def rescaled(rule: Rule, f: float = 2) -> Rule:
     """The same rule on an f-times finer grid: kernel radius R -> f*R (rings, widths, T unchanged)."""
     return Rule(copy.deepcopy(rule.kernels), R=rule.R * f, T=rule.T, channels=rule.channels, kn=rule.kn, gn=rule.gn)
 
 
+# ---------- texture: is there structure at the scale of single cells? ----------
+
+TEXTURE_CUTOFF = 0.25      # cycles per cell: wavelengths shorter than 4 cells count as grid-scale
+
+
+def texture(P: np.ndarray, cutoff: float = TEXTURE_CUTOFF) -> float:
+    """Share of a creature's spatial power at wavelengths below 1/cutoff cells (mean removed per channel;
+    channels weighted by their mass). Experiment A, first run: archive median 0.03; a striped family at
+    R = 12 0.20-0.32 (its stripes turned out to be real: they widen with R)."""
+    P = np.asarray(P, np.float32)
+    P = P[None] if P.ndim == 2 else P
+    fy = np.fft.fftfreq(P.shape[-2])[:, None]
+    fx = np.fft.fftfreq(P.shape[-1])[None]
+    hi = np.hypot(fy, fx) > cutoff
+    num = den = 0.0
+    for c in P:
+        m = float(c.sum())
+        if m <= 0:
+            continue
+        F = np.abs(np.fft.fft2(c - c.mean())) ** 2
+        num += m * float(F[hi].sum()) / max(float(F.sum()), 1e-12)
+        den += m
+    return num / den if den else 0.0
+
+
+def texture_loss(P1: np.ndarray, P2: np.ndarray, f: int = 2) -> float:
+    """How much fine structure a creature loses when the grid is refined: texture of the creature at its
+    own resolution (P1, wavelengths under 4 cells) minus texture of its f-times-finer run (P2, wavelengths
+    under 4f cells, i.e. the same wavelengths in units of R). Real Lenia structure scales with R, so the
+    share is about the same (loss near 0, up to pulsing). Grid-scale noise relaxes at the finer grid, so
+    it loses it (large loss). This catches what the descriptor-based 2x check cannot: noise that relaxes
+    into a body with the same mass profile. An absolute texture cap would instead punish real fine
+    structure."""
+    return texture(P1, TEXTURE_CUTOFF) - texture(P2, TEXTURE_CUTOFF / f)
+
+
 def rescale_check(rules: list, patterns: list, shape, th: Thresholds, ex, batch: int = 16, f: int = 2,
-                  time: float = 50.0) -> list:
+                  time: float = 50.0, with_pattern: bool = False) -> list:
     """Run each creature at f-times the resolution (rule rescaled, pattern upsampled, world f-times larger)
     and return [(class, descriptor or None)] there. A Lenia creature is a continuum object: it should
     survive and look and move the same (descriptors are in units of R). Structure that lives at the scale
@@ -162,7 +201,7 @@ def rescale_check(rules: list, patterns: list, shape, th: Thresholds, ex, batch:
     big = tuple(int(s * f) for s in shape)
     hz = Horizon(time=time, record_every=0.5, frames=6, film_span=5.0, thumb_every=0)
     res = evaluate([rescaled(r, f) for r in rules], [upsample(p, f) for p in patterns], big, hz, th, ex, batch)
-    return [(st["class"], d) for st, _, d in res]
+    return [(st["class"], d, pat) if with_pattern else (st["class"], d) for st, pat, d in res]
 
 
 # ---------- the search ----------
@@ -189,7 +228,7 @@ def _root_init(j, rule: Rule, shape) -> np.ndarray:
 
 
 def coherent_with(space, d1, res2, max_dist):
-    c, d2 = res2
+    c, d2 = res2[0], res2[1]
     if c not in ALIVE or d2 is None:
         return False, np.inf
     dist = float(space.dist(d1, np.asarray(d2)[None])[0])
@@ -197,8 +236,9 @@ def coherent_with(space, d1, res2, max_dist):
 
 
 def _setup(roots, catalogue, shape, hz_root, hz_child, th, ex, batch, rescale_time, rescale_factor, ref_desc,
-           coherent_factory, log):
-    """Roots (alive and, with rescale_time, coherent) and the descriptor space (reference set + roots)."""
+           coherent_factory, log, texture_max_loss=None):
+    """Roots (alive and, with rescale_time, coherent at the finer grid) and the descriptor space
+    (reference set + roots)."""
     rr = evaluate([r for _, r, _ in roots], [_root_init(j, r, shape) for _, r, j in roots], shape, hz_root, th, ex, batch)
     arch = []
     for (lab, rule, j), (st, pat, d) in zip(roots, rr):
@@ -206,10 +246,11 @@ def _setup(roots, catalogue, shape, hz_root, hz_child, th, ex, batch, rescale_ti
             continue
         arch.append({"id": len(arch), "parent": -1, "root": len(arch), "gen": 0, "label": lab, "rule": rule,
                      "trace": st.pop("_trace", None), "init": _root_init(j, rule, shape), "final": pat,
-                     "stats": st, "desc": d, "novelty": np.nan, "rescale_dist": np.nan})
+                     "stats": st, "desc": d, "novelty": np.nan, "rescale_dist": np.nan,
+                     "texture": texture(pat), "texture_loss": np.nan})
     n_roots_alive = len(arch)
     root_scale = (rescale_check([a["rule"] for a in arch], [a["final"] for a in arch], shape, th, ex, batch,
-                                rescale_factor, rescale_time) if rescale_time and arch else None)
+                                rescale_factor, rescale_time, with_pattern=True) if rescale_time and arch else None)
     cat_desc = np.zeros((0, len(NAMES)), np.float32)
     if ref_desc is not None:
         cat_desc = np.asarray(ref_desc, np.float32).reshape(-1, len(NAMES))
@@ -228,16 +269,24 @@ def _setup(roots, catalogue, shape, hz_root, hz_child, th, ex, batch, rescale_ti
     coherent = coherent_factory(space)
     if root_scale is not None:
         keep = []
+        n_tex = 0
         for a, r2 in zip(arch, root_scale):
             ok, a["rescale_dist"] = coherent(a["desc"], r2)
             a["stats"]["rescale_class"] = r2[0]
+            if ok and r2[2] is not None:
+                a["texture_loss"] = texture_loss(a["final"], r2[2], rescale_factor)
+                if texture_max_loss is not None and a["texture_loss"] > texture_max_loss:
+                    ok = False
+                    n_tex += 1
             if ok:
                 keep.append(a)
+        if n_tex:
+            log(f"roots: {n_tex} coherent at {rescale_factor}x but losing fine structure there (texture loss > {texture_max_loss:.3f})")
         for i, a in enumerate(keep):
             a["id"] = a["root"] = i
         arch = keep
     log(f"roots: {n_roots_alive} of {len(roots)} alive under current thresholds"
-        + (f", {len(arch)} of them also coherent at {rescale_factor}x resolution" if rescale_time else ""))
+        + (f", {len(arch)} of them also smooth and coherent at {rescale_factor}x resolution" if rescale_time else ""))
     if not arch:
         raise SystemExit("no living roots that are coherent at the finer grid")
     space.cat_desc, space.n_roots_alive = cat_desc, n_roots_alive
@@ -264,9 +313,12 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
             evals: int = 3000, children_per_gen: int = 32, child_time: float = 100.0, confirm_time: float = 200.0, mut_scale: float = 1.0,
             rescale_time: float = 50.0, rescale_factor: int = 2, rescale_max_dist: float = RESCALE_MAX_DIST,
             k: int = 5, workers: int = 0, batch: int = 16, seed: int = 0, cmap: str = "chan",
-            checkpoint_every_s: float = 120.0, ref_desc: np.ndarray | None = None, log=print) -> dict:
+            checkpoint_every_s: float = 120.0, ref_desc: np.ndarray | None = None,
+            texture_max_loss: float | None = None, log=print) -> dict:
     """ref_desc: descriptors of a reference set (e.g. Chan's found/ creatures from `lenia found survey`), used
-    instead of simulating `catalogue` for the descriptor scale and the 'beyond the reference' measures."""
+    instead of simulating `catalogue` for the descriptor scale and the 'beyond the reference' measures.
+    texture_max_loss: at the 2x check, also reject creatures that lose more than this much fine structure
+    at the finer grid (`texture_loss`; None = no such check; `lenia found survey` calibrates it)."""
     th = th or Thresholds()
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
@@ -278,12 +330,13 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
     hz_confirm = Horizon(time=confirm_time, record_every=0.5, frames=6, film_span=5.0, thumb_every=0)
     n_late = [0]
     n_rescale_fail = [0]
+    n_texture_fail = [0]
     rescale_cost = rescale_time * rescale_factor ** 2 / child_time    # one check, in child-equivalents
     hz_root = Horizon(time=max(child_time, 50.0), record_every=0.5, frames=12, film_span=10.0, thumb_every=0)
 
     def coherent(d1, res2):
         """Alive at the finer grid, and the same creature there: descriptor distance <= rescale_max_dist."""
-        c, d2 = res2
+        c, d2 = res2[0], res2[1]
         if c not in ALIVE or d2 is None:
             return False, np.inf
         dist = float(space.dist(d1, np.asarray(d2)[None])[0])
@@ -296,11 +349,13 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
         arch, hist, n_eval, gen, alive_children = g["arch"], g["hist"], g["n_eval"], g["gen"], g["alive_children"]
         tau, noise, nn0, cat_desc, space, rng = g["tau"], g["noise"], g["nn0"], g["cat_desc"], g["space"], g["rng"]
         n_late, n_rescale_fail, n_roots, n_roots_alive = g["n_late"], g["n_rescale_fail"], g["n_roots"], g["n_roots_alive"]
+        n_texture_fail = g.get("n_texture_fail", [0])
         t0 -= g["elapsed"]
         log(f"resuming from {ckpt.name}: generation {gen}, {round(n_eval)} evals, archive {len(arch)}")
     else:
         arch, space = _setup(roots, catalogue, shape, hz_root, hz_child, th, ex, batch, rescale_time, rescale_factor, ref_desc,
-                             coherent_factory=lambda sp: (lambda d1, r2: coherent_with(sp, d1, r2, rescale_max_dist)), log=log)
+                             coherent_factory=lambda sp: (lambda d1, r2: coherent_with(sp, d1, r2, rescale_max_dist)), log=log,
+                             texture_max_loss=texture_max_loss)
         cat_desc = space.cat_desc
         n_roots_alive, n_roots = space.n_roots_alive, len(arch)
         D = lambda: np.array([a["desc"] for a in arch])
@@ -314,7 +369,7 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
     def save():
         _save_checkpoint(ckpt, {"arch": arch, "hist": hist, "n_eval": n_eval, "gen": gen, "alive_children": alive_children,
                                 "tau": tau, "noise": noise, "nn0": nn0, "cat_desc": cat_desc, "space": space, "rng": rng,
-                                "n_late": n_late, "n_rescale_fail": n_rescale_fail, "n_roots": n_roots,
+                                "n_late": n_late, "n_rescale_fail": n_rescale_fail, "n_texture_fail": n_texture_fail, "n_roots": n_roots,
                                 "n_roots_alive": n_roots_alive, "elapsed": time.time() - t0})
     if state is None:
         save()
@@ -342,15 +397,16 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
         # second stage: candidates must also be alive after confirm_time (catches late failures);
         # the archive keeps the confirmed run's final creature, statistics and descriptor
         n_cand = len(cands)
-        n_failed_scale = 0
+        n_failed_scale = n_failed_tex = 0
         if cands:
             conf = evaluate([kr for _, kr in cands], [p["final"] for p, _ in cands], shape, hz_confirm, th, ex, batch)
-            # third stage: the confirmed creature must also live at a finer grid (not speckle)
+            # third stage: the confirmed creature must also live at a finer grid, as the same creature
+            # with the same fine structure (not speckle, not grid-scale texture)
             ok = [i for i, (_, pat, _) in enumerate(conf) if pat is not None]
             scl = [None] * len(cands)
             if rescale_time:
                 for i, c in zip(ok, rescale_check([cands[i][1] for i in ok], [conf[i][1] for i in ok], shape, th, ex,
-                                                  batch, rescale_factor, rescale_time)):
+                                                  batch, rescale_factor, rescale_time, with_pattern=True)):
                     scl[i] = c
                 n_eval += len(ok) * rescale_cost
             for (p, kr), (st, pat, d), sc in zip(cands, conf, scl):
@@ -359,6 +415,7 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
                 if pat is None:
                     n_late[0] += 1
                     continue
+                tl = np.nan
                 rdist = np.nan
                 if rescale_time:
                     ok_, rdist = coherent(d, sc)
@@ -367,11 +424,16 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
                         n_rescale_fail[0] += 1
                         n_failed_scale += 1
                         continue
+                    tl = texture_loss(pat, sc[2], rescale_factor)
+                    if texture_max_loss is not None and tl > texture_max_loss:
+                        n_texture_fail[0] += 1
+                        n_failed_tex += 1
+                        continue
                 nov = space.knn_mean(d, D(), k)
                 if nov >= tau:
                     arch.append({"id": len(arch), "parent": p["id"], "root": p["root"], "gen": gen, "label": "",
                                  "trace": trace, "rule": kr, "init": p["final"], "final": pat, "stats": st, "desc": d,
-                                 "novelty": nov, "rescale_dist": rdist})
+                                 "novelty": nov, "rescale_dist": rdist, "texture": texture(pat), "texture_loss": tl})
                     n_added += 1
             n_eval += len(cands) * confirm_time / child_time     # count confirmation runs in child-equivalents
         # keep roughly 5-25% of living children
@@ -380,14 +442,15 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
         elif n_added == 0:
             tau *= 0.95
         hist.append({"gen": gen, "evals": round(n_eval), "alive": n_alive, "candidates": n_cand, "added": n_added,
-                     "failed_rescale": n_failed_scale,
+                     "failed_rescale": n_failed_scale, "failed_texture": n_failed_tex,
                      "archive": len(arch),
                      "tau": round(tau, 3), "classes": classes})
         if time.time() - last_save > checkpoint_every_s or n_eval >= evals:
             save()
             last_save = time.time()
         if gen % 10 == 0 or n_eval >= evals:
-            log(f"  gen {gen}: {round(n_eval)} evals, alive {n_alive}/{len(kids)}, candidates {n_cand}, failed {rescale_factor}x {n_failed_scale}, added {n_added}, archive {len(arch)}, "
+            log(f"  gen {gen}: {round(n_eval)} evals, alive {n_alive}/{len(kids)}, candidates {n_cand}, failed {rescale_factor}x "
+                f"{n_failed_scale} (+{hist[-1]['failed_texture']} lost texture), added {n_added}, archive {len(arch)}, "
                 f"tau {tau:.2f}, {time.time() - t0:.0f}s")
     if ex:
         ex.shutdown()
@@ -411,7 +474,10 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
                "candidates_failed_confirmation": int(n_late[0]),
                "rescale": {"factor": rescale_factor, "time": rescale_time, "max_dist": rescale_max_dist, "roots_alive": n_roots_alive,
                            "roots_failed": n_roots_alive - n_roots, "candidates_failed": int(n_rescale_fail[0])}
-               if rescale_time else None}
+               if rescale_time else None,
+               "texture": {"max_loss": texture_max_loss, "candidates_failed": int(n_texture_fail[0]),
+                           "archive_median": round(float(np.nanmedian([a.get("texture", np.nan) for a in arch])), 4),
+                           "archive_max": round(float(np.nanmax([a.get("texture", np.nan) for a in arch])), 4)}}
     kids_ = [a for a in arch if a["parent"] >= 0]
     if kids_:
         dr = np.array([a["dist_root"] for a in kids_])
@@ -445,12 +511,12 @@ def explore(roots: list, out: Path, catalogue: list | None = None, shape=(128, 1
     with open(out / "archive.csv", "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["id", "parent", "root", "gen", "label", "class", "speed_w", "change_w", "mass_end", "novelty",
-                    "dist_root", "param_root", "dist_cat", "rescale_class", "rescale_dist", "rule"] + NAMES)
+                    "dist_root", "param_root", "dist_cat", "rescale_class", "rescale_dist", "texture", "texture_loss", "rule"] + NAMES)
         for a in arch:
             s = a["stats"]
             w.writerow([a["id"], a["parent"], a["root"], a["gen"], a["label"], s["class"], s["speed_w"], s["change_w"],
                         s["mass_end"], a["novelty"], a["dist_root"], a["param_root"], a["dist_cat"], s.get("rescale_class", ""), a.get("rescale_dist", np.nan),
-                        a["rule"].to_json()]
+                        a.get("texture", np.nan), a.get("texture_loss", np.nan), a["rule"].to_json()]
                        + [float(x) for x in a["desc"]])
     np.save(out / "catalogue_desc.npy", cat_desc)
     np.savez_compressed(out / "traces.npz", **{str(a["id"]): a["trace"] for a in arch if a.get("trace") is not None})
@@ -476,7 +542,7 @@ def _pictures(arch, alive_children, cat_desc, space, hist, out, cmap, shape):
     key = (lambda a: a["dist_cat"]) if len(cat_desc) else (lambda a: a["dist_root"])
     top = sorted(kids, key=key, reverse=True)[:40]
     items = [(f"#{a['id']} {a['dist_cat']:.1f}", _tile(a["final"], R, cmap)) for a in top]
-    render.sheet(items, cols=5, title="farthest from Chan's catalogue (label: id, descriptor distance)").save(out / "sheet_novel.png")
+    render.sheet(items, cols=5, title="farthest from the reference set (label: id, descriptor distance)").save(out / "sheet_novel.png")
     roots = [a for a in arch if a["parent"] < 0]
     render.sheet([(f"root {a['label']}", _tile(a["final"], R, cmap)) for a in roots], cols=6,
                  title="roots (survey survivors)").save(out / "sheet_roots.png")
@@ -515,7 +581,7 @@ def _pictures(arch, alive_children, cat_desc, space, hist, out, cmap, shape):
     fig, ax = plt.subplots(1, 2, figsize=(12, 5))
     if len(cat_desc):
         pc = proj(cat_desc)
-        ax[0].scatter(pc[:, 0], pc[:, 1], s=10, c="#bbbbbb", label="Chan's catalogue")
+        ax[0].scatter(pc[:, 0], pc[:, 1], s=10, c="#bbbbbb", label="reference set (Chan's creatures)")
     if len(Dk):
         pk = proj(Dk)
         sc = ax[0].scatter(pk[:, 0], pk[:, 1], s=10, c=[a["gen"] for a in kids], cmap="viridis", label="archive (colour = generation)")
@@ -551,7 +617,9 @@ def load_archive(run: Path) -> list:
                      "desc": np.array([float(r[n]) for n in NAMES], np.float32), "novelty": fl("novelty"),
                      "dist_root": fl("dist_root"), "param_root": fl("param_root"), "dist_cat": fl("dist_cat"),
                      "rescale_class": r.get("rescale_class", ""),
-                     "rescale_dist": float(r["rescale_dist"]) if r.get("rescale_dist") not in (None, "", "nan") else np.nan})
+                     "rescale_dist": float(r["rescale_dist"]) if r.get("rescale_dist") not in (None, "", "nan") else np.nan,
+                     "texture": float(r["texture"]) if r.get("texture") not in (None, "", "nan") else np.nan,
+                     "texture_loss": float(r["texture_loss"]) if r.get("texture_loss") not in (None, "", "nan") else np.nan})
     return arch
 
 

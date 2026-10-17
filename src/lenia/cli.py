@@ -75,7 +75,11 @@ def main(argv=None) -> int:
                    help="archive candidates (and roots) must also live this long at a finer grid (0 = no check)")
     p.add_argument("--rescale-factor", type=int, default=2, help="how much finer: R -> factor*R, pattern upsampled")
     p.add_argument("--rescale-max-dist", type=float, help="... and stay within this descriptor distance of itself "
-                                                          "(default: calibrated on the catalogue, see explore.RESCALE_MAX_DIST)")
+                                                          "(default: from --from-found's calibration.json, else "
+                                                          "calibrated on the catalogue, see explore.RESCALE_MAX_DIST)")
+    p.add_argument("--texture-max-loss", type=float, help="at the 2x check, also reject creatures that lose more fine "
+                                                          "structure than this (default: from --from-found's "
+                                                          "calibration.json, else off; negative = off)")
     p.add_argument("--no-catalogue", action="store_true", help="skip the comparison with Chan's catalogue")
     p.add_argument("--replot", help="instead of searching: redraw a finished run's pictures and lineage GIF")
     p.add_argument("--confirm", help="instead of searching: re-run a finished run's most novel and random members "
@@ -140,6 +144,9 @@ def main(argv=None) -> int:
     p.add_argument("action", choices=["download", "survey"])
     p.add_argument("--files", help="comma-separated file names (default: found.DEFAULT)")
     p.add_argument("--n-per-file", type=int, default=0, help="survey: random subset per file (0 = all)")
+    p.add_argument("--target-R", type=float, help="survey: bring every creature to this kernel radius (default: the "
+                                                   "config's world.R, 20 in configs/found.yaml; 0 = keep Chan's own R)")
+    p.add_argument("--no-calibrate", action="store_true", help="survey: skip the 2x calibration")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out")
 
@@ -172,7 +179,7 @@ def main(argv=None) -> int:
             print(f"files in {folder}")
             return 0
         import numpy as np
-        cs = found.load(folder, names, max_size=min(shape) // 2)
+        cs = found.load(folder, names, max_size=min(shape) // 2, target_R=(cfg["world"]["R"] if a.target_R is None else a.target_R) or None)
         if a.n_per_file:
             rng = np.random.default_rng(a.seed)
             keep = []
@@ -185,7 +192,7 @@ def main(argv=None) -> int:
         w = cfg["run"]["workers"] or max(1, (__import__("os").cpu_count() or 2) - 1)
         ex = ProcessPoolExecutor(w) if w > 1 else None
         print(f"{len(cs)} creatures -> {out}")
-        found.survey(cs, out, shape, th, batch=cfg["run"]["batch"], ex=ex)
+        found.survey(cs, out, shape, th, batch=cfg["run"]["batch"], ex=ex, calibrate=not a.no_calibrate)
         if ex:
             ex.shutdown()
         return 0
@@ -253,10 +260,22 @@ def main(argv=None) -> int:
             return 1
         from .explore import explore, roots_from_survey
         ref_desc = None
+        checks = {}
         if a.from_found:
-            from .found import roots_from_survey as found_roots
+            from .found import calibration, roots_from_survey as found_roots
             roots, ref_desc = found_roots(Path(a.from_found), a.roots, seed=a.seed)
             a.no_catalogue = True                   # the found creatures are the reference set
+            cal = calibration(Path(a.from_found))
+            if cal:
+                if cal.get("rescale_max_dist") is not None:
+                    checks["rescale_max_dist"] = cal["rescale_max_dist"]
+                checks["texture_max_loss"] = cal.get("texture_max_loss")
+                print(f"checks calibrated on {a.from_found}: 2x max distance {checks.get('rescale_max_dist')}, "
+                      f"max texture loss {checks.get('texture_max_loss')}")
+        if a.rescale_max_dist is not None:
+            checks["rescale_max_dist"] = a.rescale_max_dist
+        if a.texture_max_loss is not None:
+            checks["texture_max_loss"] = a.texture_max_loss if a.texture_max_loss >= 0 else None
         else:
             roots = [r for f in a.from_runs.split(",") for r in roots_from_survey(Path(f))]
         cat = None
@@ -272,8 +291,7 @@ def main(argv=None) -> int:
         print(f"{len(roots)} roots -> {out}")
         explore(roots, out, cat, shape, th, evals=a.evals, children_per_gen=a.children, child_time=a.child_time,
                 confirm_time=a.confirm_time, rescale_time=a.rescale_time, rescale_factor=a.rescale_factor,
-                **({"rescale_max_dist": a.rescale_max_dist} if a.rescale_max_dist is not None else {}),
-                mut_scale=a.mut_scale, workers=a.workers if a.workers is not None else cfg["run"]["workers"],
+                **checks, mut_scale=a.mut_scale, workers=a.workers if a.workers is not None else cfg["run"]["workers"],
                 batch=cfg["run"]["batch"], seed=a.seed, cmap=rc["cmap"], ref_desc=ref_desc)
         print(f"results: {out}")
         return 0

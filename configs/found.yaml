@@ -1,0 +1,17 @@
+# Experiment A (alive v2): Chan's multi-channel found/ creatures, all brought to kernel radius 20 in a
+# 256x256 world. Merge over the defaults:  lenia --config configs/found.yaml found survey | explore ...
+#
+# Why R = 20: it is Chan's own most common R for these collections, fine structure (e.g. labyrinth
+# stripes) is still 3+ cells wide, and 92% of the creatures fit the world (at R = 26, 17% would be too
+# big for 256x256, and a 384x384 world costs 2.3x).
+world:
+  size: [256, 256]
+  R: 20                                # also the common R `lenia found survey` brings creatures to
+
+alive:
+  # 'spread' is meant for space-filling patterns. The default occupancy cap (15% of the world) was set
+  # for small classic creatures; at R = 20 in this world it binds before the radius-of-gyration cap
+  # (2.5 R) and calls large single creatures 'spread' (64 of 125 found creatures 90-128 cells wide in
+  # the first survey). 25% puts it just above a disc with radius of gyration 2.5 R, so the R-relative
+  # shape cap decides.
+  spread_occupancy: 0.25

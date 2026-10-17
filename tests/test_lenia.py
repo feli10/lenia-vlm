@@ -336,3 +336,46 @@ def test_explore_resumes(tmp_path):
     assert (tmp_path / "checkpoint.pkl").exists()
     s2 = explore(roots, tmp_path, evals=12, **kw)               # continues the same run
     assert s2["generations"] > s1["generations"] and s2["evals"] >= 12
+
+
+def test_texture_and_common_R(tmp_path):
+    """Texture separates a smooth blob from a grid-scale labyrinth; creatures can be brought to a common R
+    (non-integer resampling), and Orbium is still Orbium there."""
+    from lenia import found
+    from lenia.explore import texture, upsample
+    y, x = np.mgrid[:48, :48]
+    blob = np.exp(-((y - 24) ** 2 + (x - 24) ** 2) / 80.0)
+    maze = blob * (((y // 2) + (x // 2)) % 2)                   # 2-cell checker inside the blob
+    assert texture(blob) < 0.02 and texture(maze) > 0.3
+    from lenia.explore import texture_loss
+    y2, x2 = np.mgrid[:96, :96]
+    blob2 = np.exp(-((y2 - 48) ** 2 + (x2 - 48) ** 2) / 320.0)
+    maze2 = blob2 * (((y2 // 4) + (x2 // 4)) % 2)                    # the same labyrinth, twice the scale
+    assert abs(texture_loss(maze, maze2)) < 0.05                       # real structure: scales with the grid
+    assert texture_loss(maze, blob2) > 0.25                            # grid noise: relaxes at the finer grid
+    assert upsample(np.ones((1, 10, 10)), 2.6).shape == (1, 26, 26)
+    assert upsample(np.ones((1, 10, 10)), 2).shape == (1, 20, 20)
+    rule, cells = found.scale_to(ORBIUM, orbium_cells()[None], 26)
+    assert rule.R == 26 and cells.shape[-1] == 40
+    from lenia.alive import ALIVE
+    from lenia.explore import evaluate
+    from lenia.rollout import Horizon
+    (st, pat, d), = evaluate([rule], [cells], (128, 128), Horizon(time=10, record_every=0.5, frames=6, film_span=5.0,
+                                                                  thumb_every=0), Thresholds(), None)
+    assert st["class"] in ALIVE and texture(pat) < 0.05
+
+
+def test_found_survey_calibrates(tmp_path):
+    """`found survey` at a common R writes calibration.json, and explore --from-found's roots respect it."""
+    from lenia import found
+    o = seeds.donors()["O2u"]["cells"]
+    one = {"code": "A", "name": "orbium", "params": [{"R": 13, "T": 10, "b": "1", "m": 0.15, "s": 0.015, "kn": 1, "gn": 1}],
+           "cells": o}
+    (tmp_path / "998.json").write_text(json.dumps(one))
+    cs = found.load(tmp_path, ["998"], target_R=20, log=lambda *_: None)
+    assert cs[0]["rule"].R == 20 and cs[0]["R0"] == 13
+    s = found.survey(cs, tmp_path / "s", (96, 96), Thresholds(), time_units=12, rescale_time=6, log=lambda *_: None)
+    cal = json.loads((tmp_path / "s" / "calibration.json").read_text())
+    assert s["alive"] == 1 and cal["alive_at_2x"] == 1 and cal["texture_max_loss"] == 0.03 and cal["R"] == 20
+    roots, desc = found.roots_from_survey(tmp_path / "s", n=4)
+    assert len(roots) == 1 and roots[0][1].R == 20
