@@ -379,3 +379,22 @@ def test_found_survey_calibrates(tmp_path):
     assert s["alive"] == 1 and cal["alive_at_2x"] == 1 and cal["texture_max_loss"] == 0.03 and cal["R"] == 20
     roots, desc = found.roots_from_survey(tmp_path / "s", n=4)
     assert len(roots) == 1 and roots[0][1].R == 20
+
+
+def test_cli_explore_from_found(tmp_path):
+    """The command the Colab notebook runs: `lenia explore --from-found <survey>` reads the calibration."""
+    from lenia import found
+    from lenia.cli import main
+    o = seeds.donors()["O2u"]["cells"]
+    one = {"code": "A", "name": "orbium", "params": [{"R": 13, "T": 10, "b": "1", "m": 0.15, "s": 0.015, "kn": 1, "gn": 1}],
+           "cells": o}
+    (tmp_path / "997.json").write_text(json.dumps(one))
+    cs = found.load(tmp_path, ["997"], target_R=20, log=lambda *_: None)
+    found.survey(cs, tmp_path / "s", (96, 96), Thresholds(), time_units=12, rescale_time=6, log=lambda *_: None)
+    (tmp_path / "c.yaml").write_text("world:\n  size: [96, 96]\n  R: 20\n")
+    rc = main(["--config", str(tmp_path / "c.yaml"), "--runs", str(tmp_path), "explore", "--from-found", str(tmp_path / "s"),
+               "--roots", "2", "--evals", "4", "--children", "4", "--child-time", "4", "--confirm-time", "6",
+               "--rescale-time", "4", "--workers", "1", "--out", str(tmp_path / "e")])
+    assert rc == 0 and (tmp_path / "e" / "summary.json").exists()
+    s = json.loads((tmp_path / "e" / "summary.json").read_text())
+    assert s["texture"]["max_loss"] == 0.03

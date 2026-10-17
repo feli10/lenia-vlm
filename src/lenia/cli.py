@@ -272,12 +272,12 @@ def main(argv=None) -> int:
                 checks["texture_max_loss"] = cal.get("texture_max_loss")
                 print(f"checks calibrated on {a.from_found}: 2x max distance {checks.get('rescale_max_dist')}, "
                       f"max texture loss {checks.get('texture_max_loss')}")
+        else:
+            roots = [r for f in a.from_runs.split(",") for r in roots_from_survey(Path(f))]
         if a.rescale_max_dist is not None:
             checks["rescale_max_dist"] = a.rescale_max_dist
         if a.texture_max_loss is not None:
             checks["texture_max_loss"] = a.texture_max_loss if a.texture_max_loss >= 0 else None
-        else:
-            roots = [r for f in a.from_runs.split(",") for r in roots_from_survey(Path(f))]
         cat = None
         path = resolve(cfg, "catalogue")
         if not a.no_catalogue:
