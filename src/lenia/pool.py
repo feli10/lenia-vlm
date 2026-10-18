@@ -33,6 +33,13 @@ from .sim import Rule
 SNAP_EVERY = 2.0          # time units between the four snapshots (vlmtest.SNAP_DT)
 QUESTION = ("You are curating a gallery of the most remarkable creatures discovered in Lenia. "
             "Which creature would you rather include?")
+DESCRIPTION_DUAL = ("Each image shows one creature in two views, both at the same scale for every creature. Left: its "
+                    "movement over the last 16 time units as multiple exposures (fainter = earlier). Right: four "
+                    "close-ups 2 time units apart, in reading order.")
+DESCRIPTION_DUAL_BODY = ("Each image shows one creature in two views, each drawn relative to the creature's own size (so "
+                         "the images do not show which creature is bigger). Left: its movement over the last 16 time units "
+                         "as multiple exposures, in a window four body lengths wide (fainter = earlier). Right: four "
+                         "close-ups 2 time units apart, in reading order.")
 
 
 # ---------- build ----------
@@ -82,8 +89,8 @@ def _search_items(run: Path, per_lineage: int, rng) -> list:
     return out
 
 
-def _simulate(items: list, shape, time: float, chunk: int, log) -> list:
-    """Run each item; keep its last four frames, SNAP_EVERY time units apart. Rules differ in T (steps
+def _simulate(items: list, shape, time: float, chunk: int, log, snap: float = SNAP_EVERY, keep: int = 4) -> list:
+    """Run each item; keep its last four frames, `snap` time units apart. Rules differ in T (steps
     per time unit), so items are run in groups of equal T, in chunks (GPU memory)."""
     from .show import simulate
     out = [None] * len(items)
@@ -92,13 +99,13 @@ def _simulate(items: list, shape, time: float, chunk: int, log) -> list:
         by_T.setdefault(it[2].T, []).append(k)
     done = 0
     for T, ks in sorted(by_T.items()):
-        every = max(1, int(round(SNAP_EVERY * T)))
+        every = max(1, int(round(snap * T)))
         for c in range(0, len(ks), chunk):
             part = ks[c:c + chunk]
             sims = simulate([(items[k][1], items[k][2], ("cells", items[k][3])) for k in part], shape, time=time, every=every)
             for k, (_, _, frames, st) in zip(part, sims):
                 group, src, rule, _ = items[k]
-                out[k] = {"group": group, "source": src, "rule": rule, "frames": [np.asarray(f, np.float32) for _, f in frames[-4:]],
+                out[k] = {"group": group, "source": src, "rule": rule, "frames": [np.asarray(f, np.float32) for _, f in frames[-keep:]],
                           "stats": st}
             done += len(part)
             log(f"  simulated {done}/{len(items)}")
@@ -116,7 +123,7 @@ def _pairs(ids: list, per: int, rng) -> list:
 
 def build(out: Path, survey: Path, archive: Path, shape=(256, 256), n_chan: int = 300, per_lineage: int = 10,
           heldout: float = 0.2, pairs_train: int = 8, pairs_heldout: int = 8, time: float = 30.0, chunk: int = 64,
-          seed: int = 0, log=print) -> dict:
+          seed: int = 0, snap: float = SNAP_EVERY, log=print) -> dict:
     """Write images/, creatures.csv, pairs_train.json, pairs_heldout.json, pairs.json (both), sheet_<group>.png."""
     from .explore import texture
     from .vlmtest import _contact, grid_image, roughness
@@ -125,7 +132,7 @@ def build(out: Path, survey: Path, archive: Path, shape=(256, 256), n_chan: int 
     rng = np.random.default_rng(seed)
     items = _chan_items(survey, n_chan, rng) + _search_items(archive, per_lineage, rng)
     log(f"pool: {sum(i[0] == 'chan' for i in items)} chan + {sum(i[0] == 'search' for i in items)} search creatures; simulating")
-    sims = _simulate(items, shape, time, chunk, log)
+    sims = _simulate(items, shape, max(time, 3 * snap), chunk, log, snap)
     rows, dropped = [], []
     for s in sims:
         cls = s["stats"]["class"]
@@ -163,10 +170,150 @@ def build(out: Path, survey: Path, archive: Path, shape=(256, 256), n_chan: int 
                      out / f"sheet_{g}.png", f"{g}: 48 of {sum(r['group'] == g for r in rows)}")
     summary = {"creatures": len(rows), "per_group": {g: sum(r["group"] == g for r in rows) for g in ("chan", "search")},
                "heldout_creatures": sum(r["split"] == "heldout" for r in rows), "pairs_train": len(tr), "pairs_heldout": len(ho),
-               "dropped": dropped, "seed": seed, "survey": str(survey), "archive": str(archive)}
+               "dropped": dropped, "seed": seed, "snap": snap, "survey": str(survey), "archive": str(archive)}
     (out / "build.json").write_text(json.dumps(summary, indent=2))
     log(json.dumps({k: v for k, v in summary.items() if k not in ("dropped", "survey", "archive")}) + f"; dropped {len(dropped)}")
     return summary
+
+
+def _item_of(row: dict, survey: Path, archive: Path, cache: dict):
+    """Rebuild a pool creature's (group, source, rule, start pattern) from where build took it."""
+    rule = Rule.from_dict(json.loads(row["rule"]))
+    src = row["source"]
+    if src.startswith("chan:"):
+        if "chan" not in cache:
+            z = np.load(Path(survey) / "alive.npz")
+            cache["chan"] = {str(c): z[f"p{k}"] for k, c in enumerate(z["codes"])}
+        cells = cache["chan"][src[5:]]
+    else:
+        if "search" not in cache:
+            cache["search"] = np.load(Path(archive) / "patterns.npz")
+        cells = cache["search"][f"final_{src.rsplit('#', 1)[1]}"]
+    cells = np.asarray(cells, np.float32)
+    return (row["group"], src, rule, cells if cells.ndim == 3 else cells[None])
+
+
+def rerender(src: Path, out: Path, survey: Path, archive: Path, snap: float, split: str = "heldout",
+             shape=(256, 256), time: float | None = None, chunk: int = 64, camera: str = "fixed", upscale: int = 1,
+             log=print) -> dict:
+    """The same creatures and pairs as pool `src`, re-rendered with `snap` time units between snapshots,
+    into a new folder (same creature ids, same held-out pairs, same pairs for you to rate), so labels and
+    ratings on the two image versions can be compared pair by pair. split: 'heldout' or 'all'.
+    camera: 'fixed' (vlmtest.grid_image: one camera holding the whole path) or 'track' (vlmtest.tracking_image:
+    centred on the creature, same scale for every creature, world-fixed grid sliding underneath), 'dual'
+    (vlmtest.dual_image) or 'dual_body' (the same, each creature relative to its own size).
+    upscale: simulate every creature at upscale x R (rule rescaled, pattern upsampled, world upscale x larger)
+    for the pictures only, so small creatures show real detail instead of blurred pixels. Every pool creature
+    passed the 2x coherence check, so at 2 it is the same creature."""
+    import shutil
+    from .vlmtest import dual_image, grid_image, tracking_image
+    draw = {"track": lambda fr, R: tracking_image(fr, R), "dual": lambda fr, R: dual_image(fr, R),
+            "dual_body": lambda fr, R: dual_image(fr, R, scale="body"),
+            "fixed": lambda fr, R: grid_image(fr, R, False)}[camera]
+    n_keep = 9 if camera.startswith("dual") else 4   # dual: 16 time units of motion at 2-unit steps
+    if camera.startswith("dual"):
+        snap = 2.0
+    src, out = Path(src), Path(out)
+    (out / "images").mkdir(parents=True, exist_ok=True)
+    rows = list(csv.DictReader(open(src / "creatures.csv")))
+    keep = [r for r in rows if split == "all" or r["split"] == split]
+    cache = {}
+    items = [_item_of(r, survey, archive, cache) for r in keep]
+    if upscale > 1:
+        from .explore import rescaled, upsample
+        items = [(g, s_, rescaled(rule, upscale), upsample(c, upscale)) for g, s_, rule, c in items]
+        shape = tuple(int(x * upscale) for x in shape)
+    time = time or max(30.0, 3 * snap + 16.0)
+    log(f"re-rendering {len(items)} creatures, {snap:g} time units between snapshots ({time:g} units)")
+    sims = _simulate(items, shape, time, chunk, log, snap, n_keep)
+    dropped = []
+    for r, s_ in zip(keep, sims):
+        if s_["stats"]["class"] not in ALIVE:
+            dropped.append((r["id"], s_["stats"]["class"]))
+        Image.fromarray(draw(s_["frames"], s_["rule"].R)).save(out / "images" / f"{r['id']}.png")
+    with open(out / "creatures.csv", "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(keep[0]))
+        w.writeheader()
+        w.writerows(keep)
+    for name in ("pairs_heldout.json", "human_pairs.json") + (("pairs_train.json", "pairs.json") if split == "all" else ()):
+        if (src / name).exists():
+            shutil.copy(src / name, out / name)
+    if split != "all":
+        (out / "pairs_train.json").write_text("[]")
+        shutil.copy(out / "pairs_heldout.json", out / "pairs.json")
+    summary = {"from": str(src), "snap": snap, "camera": camera, "upscale": upscale, "time": time, "creatures": len(keep), "split": split,
+               "not_alive_in_render": dropped}
+    (out / "build.json").write_text(json.dumps(summary, indent=2))
+    log(json.dumps({k: v for k, v in summary.items() if k != "not_alive_in_render"}) + f"; not alive in render: {len(dropped)}")
+    return summary
+
+
+FEATURES = ("speed", "change", "size_rg", "mass", "texture")
+
+
+def _logit_weights(pairs: list, cre: dict, target) -> dict:
+    """What drives a set of pairwise choices, each feature holding the others fixed: logistic regression of
+    P(a chosen) on the differences of the creatures' standardised (log) features, a minus b. target(a, b)
+    gives the observed P(a chosen) (soft labels allowed). Coefficients are per standard deviation of the
+    pool; positive = prefers more of it. Fitted by Newton's method with a small ridge."""
+    if len(pairs) < 10:
+        return {}
+    fl = lambda v: float(v) if v not in (None, "", "None", "nan") else np.nan
+    ids = sorted(cre)
+    raw = {f: np.array([fl(cre[i][f]) for i in ids]) for f in FEATURES}
+    for f in ("speed", "change", "mass"):
+        raw[f] = np.log(np.maximum(raw[f], 1e-4))
+    z = {f: (v - np.nanmean(v)) / (np.nanstd(v) + 1e-9) for f, v in raw.items()}
+    idx = {i: k for k, i in enumerate(ids)}
+    X = np.array([[z[f][idx[a]] - z[f][idx[b]] for f in FEATURES] for a, b in pairs])
+    y = np.array([target(a, b) for a, b in pairs], float)
+    ok = np.isfinite(X).all(1) & np.isfinite(y)
+    X, y = X[ok], y[ok]
+    w = np.zeros(X.shape[1])
+    for _ in range(50):
+        p = 1 / (1 + np.exp(-X @ w))
+        g = X.T @ (y - p) - 0.1 * w
+        Hm = X.T @ (X * (p * (1 - p))[:, None]) + 0.1 * np.eye(len(w))
+        w = w + np.linalg.solve(Hm, g)
+    return {f: round(float(v), 2) for f, v in zip(FEATURES, w)}
+
+
+def compare(a: Path, b: Path, judge: str = "luna", prompt: str = "curate", prompt_a: str | None = None, log=print) -> dict:
+    """Two image versions of the same pairs (e.g. pool and pool-snap8): the judge's agreement with your
+    ratings on each, its order agreement, how often it picks the faster / more-changing / larger creature,
+    what drives its choices with the features held against each other (`weights`, logistic regression;
+    the same for your ratings), and how often the two versions give the same winner. prompt is the prompt
+    used on b; prompt_a the one used on a (default: the same)."""
+    from .vlmtest import _human_rows
+    out = {}
+    fl = lambda v: float(v) if v not in (None, "", "None", "nan") else np.nan
+    labs = {}
+    for name, d, pr in (("a", Path(a), prompt_a or prompt), ("b", Path(b), prompt)):
+        cre = {r["id"]: r for r in csv.DictReader(open(d / "creatures.csv"))}
+        L = {(r["a"], r["b"]): (fl(r["p_a_when_first"]), fl(r["p_a_when_second"]))
+             for r in csv.DictReader(open(d / f"labels_{judge}_{pr}.csv")) if r["split"] == "heldout"}
+        L = {k: v for k, v in L.items() if np.isfinite(v[0]) and np.isfinite(v[1])}
+        labs[name] = {k: (v[0] + v[1]) / 2 for k, v in L.items()}
+        hum = [r for r in _human_rows(d) if r["choice"] in ("left", "right")]
+        res = {"folder": str(d), "prompt": pr, "pairs": len(L),
+               "order_agreement": round(float(np.mean([(v[0] > 0.5) == (v[1] > 0.5) for v in L.values()])), 3)}
+        hits = [(labs[name][(r["a"], r["b"])] > 0.5) == (r["winner"] == r["a"]) for r in hum if (r["a"], r["b"]) in labs[name]]
+        res["agrees_with_you"] = (round(float(np.mean(hits)), 3), len(hits)) if hits else None
+        for stat in ("speed", "change", "size_rg", "mass", "texture"):
+            res[f"picks_higher_{stat}"] = round(float(np.mean([(fl(cre[x][stat]) > fl(cre[y][stat])) == (p > 0.5)
+                                                               for (x, y), p in labs[name].items()])), 3)
+        lab_ = labs[name]
+        res["weights"] = _logit_weights(list(lab_), cre, lambda x, y: lab_[(x, y)])
+        if hum:
+            res["you_pick_higher"] = {stat: round(float(np.mean([(fl(cre[r["a"]][stat]) > fl(cre[r["b"]][stat])) == (r["winner"] == r["a"])
+                                                                for r in hum])), 3) for stat in ("speed", "change", "size_rg", "texture")}
+            win = {(r["a"], r["b"]): float(r["winner"] == r["a"]) for r in hum}
+            res["your_weights"] = _logit_weights(list(win), cre, lambda x, y: win[(x, y)])
+        out[name] = res
+    common = [k for k in labs["a"] if k in labs["b"]]
+    out["same_winner_across_versions"] = round(float(np.mean([(labs["a"][k] > 0.5) == (labs["b"][k] > 0.5) for k in common])), 3)
+    log(json.dumps(out, indent=1))
+    return out
 
 
 # ---------- label ----------

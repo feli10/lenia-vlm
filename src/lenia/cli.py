@@ -13,7 +13,10 @@
   guided     VLM-guided search: a judge (Luna, prompt 'curate') accepts mutations it prefers, under the
              alive + resolution constraints (run | check | rate | gif); needs API keys in .env
   found      Chan's found/ collections: download | survey (at a common R, with calibration of the checks)
-  pool       Phase 2 labelling pool: build (Colab) | label (needs API keys) | rate | report
+  pool       Phase 2 labelling pool: build (Colab) | label (needs API keys) | rate | report | rerender | compare
+  distill    Phase 3 student reward model: embed (PyTorch, Colab or Mac) | train (numpy) on the teacher's labels
+  rsearch    Phase 4 search against the student (or the five-statistic reward) under the alive check:
+             run (Colab) | check (teacher, needs API keys) | rate | draw
   bench      check the GPU simulator against numpy and time both (use with --backend auto)
   show       animated GIF of rules: from a survey (--run, --rules or --alive), from Chan's catalogue
              (--chan O2u,S1s) or a rule given as JSON (--rule); the camera follows the creature
@@ -129,20 +132,56 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
 
     p = sub.add_parser("pool")                  # Phase 2: labelling pool (see src/lenia/pool.py)
-    p.add_argument("action", choices=["build", "label", "rate", "report"])
+    p.add_argument("action", choices=["build", "label", "rate", "report", "rerender", "compare"])
     p.add_argument("--out", help="pool folder (default <runs>/pool)")
+    p.add_argument("--from", dest="from_pool", help="rerender: source pool (default <runs>/pool); compare: the other "
+                                                    "image version (default <runs>/pool)")
+    p.add_argument("--snap", type=float, default=2.0, help="build/rerender: time units between the four snapshots")
+    p.add_argument("--upscale", type=int, default=1, help="rerender: simulate at this multiple of R for sharper pictures")
+    p.add_argument("--camera", choices=["fixed", "track", "dual", "dual_body"], default="fixed",
+                   help="rerender: fixed camera holding the whole path; tracking (same scale, world grid slides); "
+                        "dual (wide motion view as multiple exposures + four close-ups, fixed scales; use prompt curate_dual)")
     p.add_argument("--survey", help="build: calibrated `found survey` folder (default <runs>/found-survey-v2)")
     p.add_argument("--archive", help="build: explore folder (default <runs>/expA2-explore)")
     p.add_argument("--n-chan", type=int, default=300, help="build: how many of Chan's creatures")
     p.add_argument("--per-lineage", type=int, default=10, help="build: at most this many search descendants per lineage")
     p.add_argument("--judge", default="luna", help="label: judge name (configs/lenia.yaml: judges)")
-    p.add_argument("--prompt", default="curate", help="label: prompt id (src/lenia/prompts.py)")
-    p.add_argument("--split", choices=["all", "train", "heldout"], default="all", help="label: which pairs")
+    p.add_argument("--prompt", default="curate", help="label / compare: prompt id (src/lenia/prompts.py)")
+    p.add_argument("--prompt-from", help="compare: prompt used on the --from folder (default: the same as --prompt)")
+    p.add_argument("--split", choices=["all", "train", "heldout"],
+                   help="label: which pairs (default all); rerender: heldout (default) or all creatures")
     p.add_argument("--limit", type=int, help="label: only the first N pairs (smoke test)")
     p.add_argument("--yes", action="store_true", help="label: proceed even if the estimate exceeds the budget")
     p.add_argument("--verbose", action="store_true")
     p.add_argument("--n", type=int, default=60, help="rate: how many held-out pairs you rate")
     p.add_argument("--port", type=int, default=8765, help="rate: local port")
+    p.add_argument("--seed", type=int, default=0)
+
+    p = sub.add_parser("distill")               # Phase 3: student reward model (see src/lenia/distill.py)
+    p.add_argument("action", choices=["embed", "train"])
+    p.add_argument("--pool", help="pool folder (default <runs>/pool2)")
+    p.add_argument("--model", default="dinov2_vits14", help="embed/train: image model (dinov2_vits14 | dinov2_vitb14 | clip_vitb32)")
+    p.add_argument("--judge", default="luna", help="train: teacher")
+    p.add_argument("--prompt", default="curate_dual", help="train: the teacher's prompt (labels_<judge>_<prompt>.csv)")
+    p.add_argument("--kind", choices=["linear", "mlp"], default="linear", help="train: reward head")
+    p.add_argument("--ensemble", type=int, default=5)
+    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--out")
+
+    p = sub.add_parser("rsearch")               # Phase 4: search against a reward model (see src/lenia/rsearch.py)
+    p.add_argument("action", choices=["run", "check", "rate", "draw"])
+    p.add_argument("--out", help="run folder (default <runs>/rsearch-<reward>)")
+    p.add_argument("--reward", choices=["student", "features"], default="student")
+    p.add_argument("--pool", help="labelling pool (default <runs>/pool2)")
+    p.add_argument("--student", help="trained student folder (default <pool>/distill_dinov2_vits14_curate_dual)")
+    p.add_argument("--survey", help="calibrated survey (default <runs>/found-survey-v2)")
+    p.add_argument("--archive", help="explore run the pool's search creatures came from (default <runs>/expA2-explore)")
+    p.add_argument("--lineages", type=int, default=16)
+    p.add_argument("--generations", type=int, default=60)
+    p.add_argument("--children", type=int, default=3, help="mutants per lineage per generation")
+    p.add_argument("--judges", default="luna,jev", help="check: judges")
+    p.add_argument("--prompt", default="curate_dual", help="check: the teacher's prompt")
+    p.add_argument("--yes", action="store_true")
     p.add_argument("--seed", type=int, default=0)
 
     p = sub.add_parser("guided")
@@ -398,13 +437,53 @@ def main(argv=None) -> int:
             guided.check(out, {n: mk(n) for n in names}, js["config"]["prompt"], cat, seed=a.seed)
             return 0
 
+    if a.cmd == "rsearch":
+        from . import rsearch
+        out = Path(a.out or runs / f"rsearch-{a.reward}")
+        pdir = Path(a.pool or runs / "pool2")
+        if a.action == "run":
+            rsearch.run(out, pdir, Path(a.survey or runs / "found-survey-v2"), Path(a.archive or runs / "expA2-explore"),
+                        Path(a.student or pdir / "distill_dinov2_vits14_curate_dual"), a.reward, a.lineages, a.generations,
+                        a.children, seed=a.seed, shape=shape, th=th, batch=cfg["run"]["batch"])
+        elif a.action == "check":
+            from .config import REPO_ROOT
+            from .judge import Judge, load_env
+            load_env(REPO_ROOT / ".env")
+            jc = cfg["judges"]
+            judges = {n: Judge(n, {**jc.get("defaults", {}), **jc[n]}, resolve(cfg, "judge_cache"), yes=a.yes)
+                      for n in a.judges.split(",")}
+            rsearch.check(out, judges, a.prompt)
+        elif a.action == "rate":
+            from .pool import QUESTION, DESCRIPTION_DUAL
+            from .vlmtest import rate
+            rate(out, n=1000, source="human_pairs.json", question=QUESTION, description=DESCRIPTION_DUAL)
+        else:
+            print(rsearch.draw(out))
+        return 0
+
+    if a.cmd == "distill":
+        from . import distill
+        pdir = Path(a.pool or runs / "pool2")
+        if a.action == "embed":
+            distill.embed(pdir, a.model)
+        else:
+            distill.train(pdir, a.model, a.judge, a.prompt, a.kind, a.ensemble, a.seed, Path(a.out) if a.out else None)
+        return 0
+
     if a.cmd == "pool":
         from . import pool
         out = Path(a.out or runs / "pool")
         if a.action == "build":
             pool.build(out, Path(a.survey or runs / "found-survey-v2"), Path(a.archive or runs / "expA2-explore"), shape,
-                       n_chan=a.n_chan, per_lineage=a.per_lineage, seed=a.seed)
+                       n_chan=a.n_chan, per_lineage=a.per_lineage, seed=a.seed, snap=a.snap)
             print(f"built: {out} (look at sheet_chan.png and sheet_search.png)")
+            return 0
+        if a.action == "rerender":
+            pool.rerender(Path(a.from_pool or runs / "pool"), out, Path(a.survey or runs / "found-survey-v2"),
+                          Path(a.archive or runs / "expA2-explore"), a.snap, a.split or "heldout", shape, camera=a.camera, upscale=a.upscale)
+            return 0
+        if a.action == "compare":
+            pool.compare(Path(a.from_pool or runs / "pool"), out, a.judge, a.prompt, a.prompt_from)
             return 0
         if a.action == "label":
             from .config import REPO_ROOT
@@ -413,11 +492,14 @@ def main(argv=None) -> int:
             jc = cfg["judges"]
             judge = Judge(a.judge, {**jc.get("defaults", {}), **jc[a.judge]}, resolve(cfg, "judge_cache"), yes=a.yes,
                           verbose=a.verbose)
-            pool.label(out, judge, a.prompt, a.split, a.limit)
+            pool.label(out, judge, a.prompt, a.split or "all", a.limit)
             return 0
         if a.action == "rate":
             from .vlmtest import rate
-            rate(out, n=a.n, port=a.port, source="pairs_heldout.json", question=pool.QUESTION)
+            cam = json.loads((out / "build.json").read_text()).get("camera", "fixed") if (out / "build.json").exists() else "fixed"
+            kw = ({"description": pool.DESCRIPTION_DUAL} if cam == "dual" else
+                  {"description": pool.DESCRIPTION_DUAL_BODY} if cam == "dual_body" else {})
+            rate(out, n=a.n, port=a.port, source="pairs_heldout.json", question=pool.QUESTION, **kw)
             return 0
         pool.report(out)
         return 0

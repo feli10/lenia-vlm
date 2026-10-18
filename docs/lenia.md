@@ -651,6 +651,284 @@ uv run lenia --runs "$RUNS" pool rate                                 # 60 held-
 uv run lenia --runs "$RUNS" pool report
 ```
 
+### Judge check on the pool (2026-10-17)
+
+Pool: 433 creatures (283 chan, 150 search; 87 held out), 2,733 training and 657 held-out pairs; 11
+of Chan's creatures dropped as not alive in the 30-unit render run.
+
+| | order agr. | 1st slot | decisive | chan > search | agrees with Felix (60) | picks larger size / mass | picks faster / more change |
+|---|---|---|---|---|---|---|---|
+| Luna / curate | 0.79 | 0.54 | 0.47 | 0.49 | 0.72 (decisive pairs 0.77, close 0.65) | 0.68 / 0.71 | 0.50 / 0.52 |
+| Jev / curate | 0.87 | 0.44 | 0.33 | 0.53 | 0.58 | (r = +0.70 with size) | |
+| Felix | | | | 0.56 (25) | | 0.57 / 0.52 | 0.68 / 0.63 |
+
+Luna and Jev pick the same winner on 76% of held-out pairs, and on 99% of the pairs where both are
+decisive. Felix also prefers smoother creatures (picks the less textured one 65% of the time); Luna
+is nearly neutral there (53%).
+
+Reading:
+- Luna is consistent enough to distil (order agreement about 0.8), and it ranks the faint
+  light-creature loophole at the very bottom, as hoped. Its top 12 are large, structured creatures:
+  dumbbells, fringed discs, spirals.
+- Search descendants are judged as good as Chan's own creatures (0.49 by Luna, 0.53 by Jev).
+- Agreement with Felix drops from 0.85 (classic pool) to 0.72, and the difference is specific:
+  Felix rewards motion and change, Luna does not respond to them at all (0.50, 0.52) but rewards
+  size and mass. Felix saw motion in the same images (the faint grid shows a shift); Luna
+  apparently does not, and little motion is visible to begin with: the median creature moves 0.05 R
+  per time unit, so about 0.1 R between panels 2 units apart (0.75 R across all four panels even at
+  the 90th percentile).
+- Jev agrees with Felix barely above chance (0.58) and is the most size-driven: it stays a second
+  opinion, not a teacher.
+
+### Motion test (2026-10-17)
+
+The 87 held-out creatures re-rendered with 8 time units between snapshots instead of 2 (`pool rerender
+--snap 8`, folder `pool-snap8`); Luna re-labelled the 657 held-out pairs, and Felix re-rated the same
+60 pairs on the new images.
+
+| | Luna order agr. | Luna agrees with Felix | Luna picks faster | Luna picks larger (size / mass) | Felix picks faster / more change |
+|---|---|---|---|---|---|
+| 2 units (pool) | 0.80 | 0.72 | 0.54 | 0.71 / 0.73 | 0.68 / 0.63 |
+| 8 units (pool-snap8) | 0.81 | 0.55 | 0.50 | 0.72 / 0.74 | 0.77 / 0.72 |
+
+Read naively, wider gaps made Luna worse. Two things explain it:
+- **A framing confound.** The fixed camera fits each creature's whole path, so fast creatures are
+  drawn smaller: with 8-unit gaps, on-screen size relative to the 2-unit images falls with speed
+  (Spearman -0.46; median creature 72% of its old size). Luna picks the creature that is larger on
+  screen 67% of the time; Felix picks the smaller one 72% of the time (on screen, smaller now means
+  faster).
+- **Luna does value motion when it is not confounded with size.** In pairs where one creature is at
+  least twice as fast and is not smaller on screen, Luna picks the faster one 86% of the time (64
+  pairs).
+
+Noise ceiling: Felix's own picks on the same 60 pairs agree across the two image versions 78% of the
+time, so the 0.72 agreement on the original images is close to his own test-retest consistency.
+
+Tried while analysing (not labelled): a fixed camera with one scale for all (a window of at least
+10 R) makes slow, detailed creatures tiny, because a fast glider needs 12 R; a tracking camera at one
+scale with a world-fixed grid hides motion again (the sliding grid is too weak a cue); tracking at
+one scale with the creature's recent path drawn as a thin line shows motion and keeps true size
+(`vlmtest.tracking_image`; the trail is a prototype).
+
+### Two-view images (2026-10-17)
+
+Felix's proposal after the motion test: give each creature a zoomed-out view where motion is clear
+and zoomed-in views where shape is clear (`vlmtest.dual_image`, `pool rerender --camera dual`).
+One composite image per creature (so the judges still compare image A with image B, and the student
+later gets one input), 1032x512:
+- left, motion: a 12 R window fixed in the world and centred on the creature's mean position, the
+  same scale for every creature; the creature's positions over the last 16 time units overlaid as
+  multiple exposures (every 4 units, earlier = fainter; chronophotography); faint world grid every R.
+  Distance travelled is comparable across creatures, and nothing is zoomed to fit its path.
+- right, close-ups: four panels 2 time units apart in reading order, each centred on the creature in
+  a 7 R window, again the same scale for every creature: shape and shape change, at true size.
+- prompt `curate_dual`: the same curator question with a description of the two views;
+  the rating page shows a matching description.
+
+`pool compare` now also reports `weights`: a logistic regression of the choices on the
+differences in speed, change, size, mass and texture (standardised, log for speed, change and mass),
+so each feature's effect is read with the others held fixed. On the existing labels:
+
+| | speed | change | size | mass | texture |
+|---|---|---|---|---|---|
+| Luna, 2-unit images | +0.02 | +0.22 | -0.69 | +1.33 | +0.12 |
+| Luna, 8-unit images | -0.11 | +0.33 | -0.46 | +1.36 | +0.25 |
+| Felix, 2-unit images (60) | +0.73 | +0.03 | +0.51 | -0.14 | -0.61 |
+| Felix, 8-unit images (60) | +0.79 | +0.37 | +0.06 | +0.11 | -0.71 |
+
+Held fixed against each other, Luna's choices are driven by mass (how much material, i.e. how much
+bright colour) and not by speed; Felix's by speed and smoothness (60 pairs, so his weights are
+rough). Size and mass are correlated, so their separate signs matter less than their sum.
+
+Result (Luna `curate_dual` on the 657 held-out pairs; Felix re-rated the same 60 pairs):
+
+| | Luna order agr. | Luna agrees with Felix | Luna picks faster / more change / larger | Luna weights: speed, change, size, mass, texture |
+|---|---|---|---|---|
+| 2-unit images | 0.80 | 0.72 | 0.54 / 0.52 / 0.71 | +0.02, +0.22, -0.69, +1.33, +0.12 |
+| two-view images | **0.89** | 0.70 | **0.65** / 0.58 / 0.85 | **+0.25**, +0.14, +0.56, +0.48, -0.06 |
+| Felix, two-view (60) | | | 0.75 / 0.70 / 0.60 | +0.78, +0.13, +0.39, +0.22, -0.70 |
+
+- The format works: Luna is markedly more self-consistent (0.89 order agreement), and motion now
+  registers in its choices (speed weight +0.25 with size and mass held fixed, from about 0). Felix
+  finds it the most intuitive of the formats tried, and his own picks agree 83-85% with his picks on
+  the earlier formats.
+- Agreement with Felix stays at 0.70. The remaining gap is taste, not representation: Luna weights
+  size and mass about twice as much as Felix (true size is now salient in the close-ups) and
+  ignores fine texture, which Felix dislikes (-0.70).
+- Decision: the two-view image is the format for the pool and for the reward model's input; Luna
+  with `curate_dual` is the teacher. The Luna-human gap (size up, texture-blind, motion under-weighted)
+  is a measured property of the teacher, to report and to watch in Phase 4 (the student should inherit
+  it; search against it should push toward big creatures).
+- Full pool re-rendered in this format: `pool2` (all 433 creatures, same ids, splits and pairs; Felix's
+  60 two-view ratings copied in).
+
+### Full pool in the two-view format (pool2, 2026-10-18)
+
+Luna `curate_dual` on all 3,390 pairs, Jev on the 657 held-out pairs:
+
+| | order agr. | agrees with Felix (60) | chan > search | r(score, size) | r(score, speed) |
+|---|---|---|---|---|---|
+| Luna | 0.86 | 0.70 | 0.40 | +0.90 | +0.27 |
+| Jev | 0.83 | 0.72 | 0.47 | +0.83 | +0.40 |
+
+Luna and Jev now pick the same winner on 88% of held-out pairs (100% where both are decisive); Jev
+went from 0.58 to 0.72 agreement with Felix with the new images.
+
+**The teacher is mostly a size detector.** "The larger creature wins" reproduces 86% of Luna's
+labels and 98% of its decisive ones (Jev 80%, Felix 60%). Broken down by how different the two sizes
+are (radius of gyration ratio):
+
+| size ratio | pairs | Luna order agr. | confidence | picks larger | picks faster | picks more change |
+|---|---|---|---|---|---|---|
+| 1.0-1.1 | 515 | 0.68 | 0.31 | 0.57 | 0.67 | 0.60 |
+| 1.1-1.25 | 657 | 0.72 | 0.34 | 0.75 | 0.62 | 0.60 |
+| 1.25-1.5 | 785 | 0.89 | 0.51 | 0.92 | 0.61 | 0.58 |
+| > 1.5 | 1,433 | 0.98 | 0.72 | 0.99 | 0.56 | 0.55 |
+
+Luna behaves lexicographically: if one creature is clearly bigger it wins, confidently and
+consistently; only among similar sizes do motion and change decide, and there Luna leans the same
+way as Felix (faster 0.67). Search descendants are larger than Chan's creatures (median radius of
+gyration 0.99 vs 0.66 R), which is why they now win 60% of mixed pairs.
+
+Consequence for the study: distilled as is, the student will mostly learn size, a feature one line
+of code computes, and search against it will push creatures to the size limits of the alive check
+(radius of gyration 2.5 R, occupancy 25%). That is a clean composition result, but a thin aesthetic
+one. Options: distil as is and report it; remove size from the image (each creature drawn relative
+to its own size: close-ups fit the creature, motion in body lengths); label size-matched pairs;
+or tell the judge to set size aside (a prompt arm).
+
+### Size-removed test (2026-10-18): not adopted
+
+Each creature drawn relative to its own size (`--camera dual_body`, prompt `curate_dual_body`), 87 held-out
+creatures, Luna on the 657 held-out pairs, Felix on the same 60 pairs. Decision rule fixed beforehand:
+adopt if Luna's "picks larger" < 0.75, order agreement >= 0.80 and agreement with Felix >= 0.70.
+
+| | Luna order agr. | confidence | decisive | agrees with Felix | picks faster / larger / heavier | Luna weights: speed, change, size, mass, texture |
+|---|---|---|---|---|---|---|
+| two-view, true size | 0.89 | 0.53 | 0.54 | 0.70 | 0.65 / 0.85 / 0.84 | +0.32, +0.15, +0.68, +0.45, -0.06 |
+| two-view, size removed | 0.76 | 0.28 | 0.16 | 0.75 | 0.62 / 0.65 / 0.66 | +0.17, +0.10, -0.18, +0.41, +0.03 |
+
+Size preference drops as intended and agreement with Felix rises a little, but Luna becomes much less
+sure (only 16% of pairs decisive) and less self-consistent (0.76, below the 0.80 bar). With size taken
+away, Luna has weak preferences among these creatures; size was most of what it judged confidently.
+Felix's own picks agree 88% across the two versions. Decision: keep the true-size two-view format
+(pool2, `curate_dual`) and distil as is.
+
+### Resolution test (2026-10-18): resolution is not the confound
+
+Felix's hypothesis: small creatures look blurry when zoomed (too few cells upscaled), so "Luna prefers
+big creatures" might be "Luna prefers creatures it can see clearly". Test: the 87 held-out creatures
+simulated at 2R (R = 40; rule rescaled, pattern upsampled; all passed the 2x check, so the same
+creature) purely for the pictures (`pool rerender --upscale 2`), in both formats. Rule fixed beforehand:
+resolution is the confound if the sharp size-removed images bring Luna back to >= 0.80 order agreement
+without a strong size preference, or if the sharp true-size images clearly lower the size preference.
+
+| held-out, Luna | order agr. | confidence | decisive | picks larger / heavier / faster | weights: speed, size, mass |
+|---|---|---|---|---|---|
+| two-view (pool2) | 0.89 | 0.53 | 0.54 | 0.85 / 0.84 / 0.65 | +0.32, +0.68, +0.45 |
+| two-view, sharp (pool-2x) | 0.86 | 0.55 | 0.58 | 0.87 / 0.82 / 0.63 | +0.26, +0.56, +0.54 |
+| size removed (pool-body) | 0.76 | 0.28 | 0.16 | 0.65 / 0.66 / 0.62 | +0.17, -0.18, +0.41 |
+| size removed, sharp (pool-body-2x) | 0.77 | 0.30 | 0.20 | 0.64 / 0.63 / 0.60 | +0.17, -0.22, +0.48 |
+
+Sharpness changes almost nothing: the size preference is about size itself, and without it Luna stays
+unsure whether or not small creatures are sharp. Felix on the sharp size-removed images: weights speed
++0.81, size +0.54, texture -0.91; agreement with Luna 0.62. Decision: keep pool2 (R = 20, true-size
+two-view, `curate_dual`). The image-format question is closed.
+
+Next: prompt arm on pool2's held-out pairs (`curate_dual_nuanced`, `lifelike_dual`, `elegant_dual`)
+and the first student.
+
+## Phase 3: the student (built 2026-10-18)
+
+`src/lenia/distill.py`, `lenia distill embed | train`:
+- **embed** (PyTorch; Colab section 7 or `uv run --extra gpu` on the Mac): a frozen DINOv2 ViT-S/14
+  over every pool image; two-view images are split into the motion view and the close-up block,
+  each embedded on its own (384 + 384 dims), so the student sees motion and shape separately.
+- **train** (numpy, anywhere): Bradley-Terry reward on the standardised embedding (linear by default,
+  small MLP optional), soft targets = the teacher's order-averaged p_a on training pairs, L2 chosen on a
+  creature-level validation split, 5-member bootstrap ensemble (mean reward and spread, for
+  uncertainty-aware search later).
+- **evaluation**, held-out pairs only (creatures never seen in training): agreement with the teacher
+  (all, decisive, size-matched), with Jev, with Felix; against three baselines fitted or applied the
+  same way: "larger wins", "heavier wins", and a Bradley-Terry reward on the five hand-made statistics
+  (speed, change, size, mass, texture).
+
+**The bar is high.** Dry run with stand-in embeddings: the five-statistic baseline already agrees with
+Luna on 89% of held-out pairs (99% of decisive ones, 71% of size-matched ones), above Luna's own
+order agreement (86%), which is roughly the ceiling for any scorer of a noisy teacher. "Larger wins"
+alone reaches 85%. So the image student can only show it learned something beyond the statistics on
+the size-matched pairs, and in the search phase: a feature reward and an image reward can be
+exploited in different ways, which is itself an RQ1 comparison.
+
+### Prompt arm, first look (2026-10-18)
+
+Luna on pool2's 657 held-out pairs under four prompts (all on the two-view images). "same as curate" =
+same winner as `curate_dual`; rank corr. = Spearman of the Bradley-Terry scores of the 87 held-out
+creatures with `curate_dual`'s.
+
+| prompt | order agr. | confidence | decisive | agrees with Felix | picks larger / faster / smoother | same as curate | rank corr. | size-matched: picks faster |
+|---|---|---|---|---|---|---|---|---|
+| curate_dual | 0.89 | 0.53 | 0.54 | 0.70 | 0.85 / 0.65 / 0.57 | 1.00 | 1.00 | 0.77 |
+| curate_dual_nuanced ("not by how large it appears") | 0.85 | 0.53 | 0.55 | 0.72 | 0.85 / 0.62 / 0.54 | 0.94 | 0.99 | 0.70 |
+| lifelike_dual | 0.84 | 0.36 | 0.29 | 0.70 | 0.85 / 0.62 / 0.55 | 0.91 | 0.97 | 0.61 |
+| elegant_dual | 0.78 | 0.27 | 0.12 | 0.62 | 0.70 / 0.55 / 0.60 | 0.75 | 0.65 | 0.50 |
+
+- Telling the curator to set size aside changes nothing: same ranking (0.99), same size preference.
+  The instruction is accepted in words and ignored in the choices.
+- "Lifelike" gives the same ranking with less confidence. Only "elegant" ranks differently (0.65),
+  with a weaker size pull, but Luna is unsure under it (12% decisive) and it agrees less with Felix.
+- So far, on this pool, the wording barely steers the teacher: one dominant axis (size, then motion)
+  under every prompt that keeps Luna confident. Whether a more diverse pool gives the prompts more to
+  work with is open (Felix's argument).
+
+### First student (2026-10-18)
+
+DINOv2 ViT-S/14 embeddings of pool2 (motion view and close-ups, 768 dims), Bradley-Terry head on
+Luna `curate_dual`, 2,733 training pairs over 346 creatures, tested on 657 pairs between 87 unseen
+creatures:
+
+| scorer | Luna (all) | Luna (decisive) | Luna (size-matched, 100) | Jev | Felix (60) |
+|---|---|---|---|---|---|
+| student, linear | 0.92 | 1.00 | **0.84** | 0.86 | 0.63 |
+| student, MLP | 0.92 | 1.00 | 0.82 | 0.87 | 0.70 |
+| five statistics | 0.89 | 0.99 | 0.71 | 0.81 | 0.62 |
+| larger wins | 0.85 | 0.97 | 0.58 | 0.80 | 0.60 |
+| heavier wins | 0.84 | 0.96 | 0.61 | 0.75 | 0.55 |
+
+- The student reproduces the teacher on unseen creatures about as well as the teacher reproduces itself
+  across the two orders (0.89), and agrees with Jev as often as Luna does (0.88).
+- It beats the five statistics where it matters: on size-matched pairs 0.84 vs 0.71 (100 pairs, so about
+  +/- 0.09): the image model picked up part of what Luna judges beyond size.
+- Its held-out top 12 are large structured creatures (fringed discs, dumbbells, jellyfish-like forms);
+  its bottom 12 are the smallest creatures, including the faint crescents.
+
+## Phase 4: search against the student (built 2026-10-18)
+
+`src/lenia/rsearch.py`, `lenia rsearch run | check | rate | draw`:
+- **run** (Colab, GPU; no API calls): 16 lineages founded by pool2 creatures spread evenly across the
+  student's score range (the same founders for every reward). Each generation every lineage tries 3
+  mutants started from its current creature; a mutant must be alive at 100 units and coherent at 2x
+  (descriptor distance and texture loss, the survey's calibrated thresholds), is then rendered in
+  the pool's image format (two-view) and scored. The best-scoring viable mutant replaces its parent
+  if it scores higher and is still alive at 200 units (greedy hill climbing). Rewards: `student` (the
+  distilled image reward, ensemble mean) or `features` (the five-statistic reward fitted on the same
+  Luna labels). Every accepted creature is stored with its image, rule, pattern, both reward scores,
+  the student's ensemble spread and its statistics. Resumable.
+- **check** (Mac): Luna (`curate_dual`) and Jev on founder vs the lineage's creature at checkpoints
+  (generations 5, 10, 20, 40, 60), both orders. The curve per checkpoint: mean student gain, mean
+  feature gain, the teacher's P(new beats founder), and the median size, mass and speed. This is the
+  RQ1 measurement: does the teacher agree with the reward as search pressure grows?
+- **rate**: you rate founder vs final per lineage.
+
+Predictions written down before the runs: (1) under the student, size and mass climb toward the
+alive check's limits (radius of gyration 2.5 R, occupancy 25%); (2) the teacher agrees with early
+gains and less with later ones (over-optimisation); (3) the student and the feature reward drift in
+different directions once size saturates, since the student also learned something beyond the
+statistics.
+
+Dry run on real creatures (CPU, 4 lineages, 2 generations, features reward): works end to end.
+Estimated cost on a T4: about an hour per 60-generation run.
+
 ## Open issues (as of 2026-10-17)
 
 **Viability (the 'alive' judge)**
@@ -726,6 +1004,9 @@ uv run lenia found download                                                 # Ch
 uv run lenia --backend auto --config configs/found.yaml found survey [--n-per-file 100]   # Experiment A: survey + calibration at R = 20
 uv run lenia --backend auto --config configs/found.yaml explore --from-found runs/found-survey --roots 64 --out runs/expA   # step 2 (resumable)
 uv run lenia --backend auto --config configs/found.yaml pool build                     # Phase 2 pool (then label/rate/report, see above)
+uv run --extra gpu lenia distill embed --pool runs/pool2 && uv run lenia distill train --pool runs/pool2   # Phase 3 student
+uv run lenia --backend auto --config configs/found.yaml rsearch run --reward student   # Phase 4 (Colab), also --reward features
+uv run lenia rsearch check --out runs/rsearch-student                                  # Phase 4 teacher check (API keys)
 uv run lenia trace --run runs/survey-classic --rules 18,141            # a rollout's future: mass, size, speed, thumbnails
 uv run python scripts/calibrate_growth.py <explore runs...>           # growth-threshold calibration
 uv run python scripts/calibrate_rescale.py                            # resolution-check calibration (catalogue)

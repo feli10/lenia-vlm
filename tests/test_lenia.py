@@ -1,6 +1,7 @@
 """lenia: simulator, classifier, seeds, sampler and a tiny end-to-end survey (offline, ~30 s)."""
 from __future__ import annotations
 
+import csv
 import json
 
 import numpy as np
@@ -433,4 +434,41 @@ def test_pool_end_to_end(tmp_path):
     srv.shutdown()
     r = pool.report(tmp_path / "p", log=lambda *_: None)
     assert "fake/curate" in r["per_judge_prompt"] and r["human"]["rated"] == 1
+    # the motion test: same held-out creatures and pairs, wider snapshot gaps, compared pair by pair
+    pool.rerender(tmp_path / "p", tmp_path / "p8", tmp_path / "s", tmp_path / "e", 4.0, "heldout", SHAPE, time=14,
+                  log=lambda *_: None)
+    assert json.loads((tmp_path / "p8" / "pairs.json").read_text()) == json.loads((tmp_path / "p" / "pairs_heldout.json").read_text())
+    pool.label(tmp_path / "p8", j, "curate", "heldout", log=lambda *_: None)
+    c = pool.compare(tmp_path / "p", tmp_path / "p8", "fake", "curate", log=lambda *_: None)
+    assert c["a"]["pairs"] == c["b"]["pairs"] and "same_winner_across_versions" in c
+    # the two-view images: wide motion view + four close-ups, fixed scales
+    pool.rerender(tmp_path / "p", tmp_path / "pd", tmp_path / "s", tmp_path / "e", 2.0, "heldout", SHAPE, time=18,
+                  camera="dual", log=lambda *_: None)
+    from PIL import Image
+    im = Image.open(next((tmp_path / "pd" / "images").glob("*.png")))
+    assert im.size == (1032, 512)
+    pool.label(tmp_path / "pd", j, "curate_dual", "heldout", log=lambda *_: None)
+    c2 = pool.compare(tmp_path / "p", tmp_path / "pd", "fake", "curate_dual", "curate", log=lambda *_: None)
+    assert c2["b"]["prompt"] == "curate_dual" and c2["a"]["prompt"] == "curate"
+    # Phase 3 on the same tiny pool: synthetic embeddings, train, evaluate on held-out pairs
+    from lenia import distill
+    ids = [r["id"] for r in csv.DictReader(open(tmp_path / "p" / "creatures.csv"))]
+    np.savez_compressed(tmp_path / "p" / "embed_fake.npz", ids=np.array(ids),
+                        emb=np.random.default_rng(0).normal(size=(len(ids), 8)).astype(np.float32), model="fake")
+    rd = distill.train(tmp_path / "p", "fake", "fake", "curate", ensemble=2, log=lambda *_: None)
+    assert "student" in rd["eval"] and (tmp_path / "p" / "distill_fake_curate" / "report.md").exists()
+    # Phase 4 on the same tiny pool: a student over 'fake' image features, a short search, the teacher check
+    from lenia import rsearch
+    from lenia.distill import Embedder
+    from PIL import Image as _I
+    E = Embedder("fake")([_I.open(tmp_path / "p" / "images" / f"{i}.png").convert("RGB") for i in ids])
+    np.savez_compressed(tmp_path / "p" / "embed_fake.npz", ids=np.array(ids), emb=E.astype(np.float32), model="fake")
+    distill.train(tmp_path / "p", "fake", "fake", "curate", ensemble=2, log=lambda *_: None)
+    for reward in ("student", "features"):
+        st = rsearch.run(tmp_path / f"rs-{reward}", tmp_path / "p", tmp_path / "s", tmp_path / "e",
+                         tmp_path / "p" / "distill_fake_curate", reward, n_lineages=2, generations=2, children=2, shape=SHAPE,
+                         log=lambda *_: None)
+        assert st["gen"] == 2 and len(st["lineages"]) == 2
+    ck = rsearch.check(tmp_path / "rs-student", {"fake": j}, "curate", log=lambda *_: None)
+    assert ck["curve"] and (tmp_path / "rs-student" / "lineages.png").exists()
     assert any(set(k.split(" vs ")) == {"fake/curate", "fake2/curate"} for k in r["agreement"])

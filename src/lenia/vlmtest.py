@@ -46,7 +46,7 @@ def roughness(F) -> float:
     return float((np.abs(np.diff(F, axis=0)).sum() + np.abs(np.diff(F, axis=1)).sum()) / max(F.sum(), 1e-9))
 
 
-def fixed_window(frames: list, R: float, occupied: float = 0.05) -> list:
+def fixed_window(frames: list, R: float, occupied: float = 0.05, min_window_r: float = 0.0) -> list:
     """Crop all frames with ONE camera: centred on the creature's mean position over the frames and
     big enough to hold its whole path, so translation stays visible (a glider shifts across the
     panels; a frozen blob doesn't). Square window, Chebyshev extent plus a margin of 0.2R per side."""
@@ -64,12 +64,12 @@ def fixed_window(frames: list, R: float, occupied: float = 0.05) -> list:
         occ = np.argwhere(f.sum(0) > occupied)
         if len(occ):
             ext = max(ext, float(np.abs(occ - np.array([H / 2, W / 2])).max()))
-    n = int(min(H, W, max(8, round(2 * ext + 0.4 * R))))
+    n = int(min(H, W, max(8, round(2 * ext + 0.4 * R), round(min_window_r * R))))
     y0, x0 = (H - n) // 2, (W - n) // 2
     return [f[:, y0:y0 + n, x0:x0 + n] for f in rc]
 
 
-def _grid_lines(tile: np.ndarray, n_cells: int, step_cells: float) -> np.ndarray:
+def _grid_lines(tile: np.ndarray, n_cells: int, step_cells: float, offset: tuple = (None, None)) -> np.ndarray:
     """Faint grid fixed to the window, painted only on empty background (never over the creature): light
     grey on white (one-channel colour map), dark grey on black (2-3 channels as RGB)."""
     t = tile.copy()
@@ -77,22 +77,28 @@ def _grid_lines(tile: np.ndarray, n_cells: int, step_cells: float) -> np.ndarray
     dark = int(np.median(np.concatenate([t[0], t[-1], t[:, 0], t[:, -1]]).max(-1))) < 128
     bg = t.max(-1) < 14 if dark else t.min(-1) > 245
     val = 52 if dark else 232
-    pos = [int(round(k * step_cells * px / n_cells)) for k in range(1, int(n_cells / step_cells) + 1)]
-    for p in pos:
+    def positions(off):
+        if off is None:     # window-fixed grid
+            return [int(round(k * step_cells * px / n_cells)) for k in range(1, int(n_cells / step_cells) + 1)]
+        return [int(round((off + k * step_cells) * px / n_cells)) for k in range(int(n_cells / step_cells) + 2)]
+    for p in positions(offset[0]):
         if 0 < p < px:
-            for sl in (np.s_[p, :], np.s_[:, p]):
-                m = bg[sl]
-                t[sl][m] = val
+            m = bg[p, :]
+            t[p, :][m] = val
+    for p in positions(offset[1]):
+        if 0 < p < px:
+            m = bg[:, p]
+            t[:, p][m] = val
     return t
 
 
-def grid_image(frames: list, R: float, whole_world: bool, cmap: str = "chan") -> np.ndarray:
+def grid_image(frames: list, R: float, whole_world: bool, cmap: str = "chan", min_window_r: float = 0.0) -> np.ndarray:
     """Four (C,H,W) frames -> one RGB image: a 2x2 grid of snapshots seen by one fixed camera (so motion
     shows), with a faint grid every kernel radius; bilinear upscale. whole_world: no crop, no grid."""
     if whole_world:
         crops = [np.asarray(f, np.float32) for f in frames]
     else:
-        crops = fixed_window(frames, R)
+        crops = fixed_window(frames, R, min_window_r=min_window_r)
     n = crops[0].shape[-1]
     tiles = []
     for a in crops:
@@ -102,6 +108,110 @@ def grid_image(frames: list, R: float, whole_world: bool, cmap: str = "chan") ->
     out = Image.new("RGB", (side, side), (205, 205, 205))
     for k, t in enumerate(tiles):
         out.paste(Image.fromarray(t), ((k % 2) * (FRAME_PX + GAP), (k // 2) * (FRAME_PX + GAP)))
+    return np.asarray(out)
+
+
+def tracking_image(frames: list, R: float, window_r: float = 7.0, cmap: str = "chan") -> np.ndarray:
+    """Four (C,H,W) frames -> 2x2 grid, the other way round from grid_image: every panel is centred on
+    the creature and every image uses the same scale (a window of window_r kernel radii), so on-screen
+    size is true size for every creature; motion shows as the faint grid, fixed to the world, sliding
+    underneath (a tracking shot). grid_image's fixed camera instead shrinks fast creatures to fit their
+    path, which confounds speed with apparent size."""
+    F = [np.asarray(f, np.float32) for f in frames]
+    F = [f if f.ndim == 3 else f[None] for f in F]
+    H, W = F[0].shape[-2:]
+    n = int(min(H, W, round(window_r * R)))
+    y0, x0 = (H - n) // 2, (W - n) // 2
+    tiles = []
+    for f in F:
+        cy, cx = centroid(f.sum(0))
+        sy, sx = int(round(H / 2 - cy)), int(round(W / 2 - cx))
+        crop = np.roll(f, (sy, sx), axis=(-2, -1))[:, y0:y0 + n, x0:x0 + n]
+        t = np.asarray(Image.fromarray(render.colorize(crop, cmap)).resize((FRAME_PX, FRAME_PX), Image.BILINEAR))
+        tiles.append(_grid_lines(t, n, R, offset=((sy - y0) % R, (sx - x0) % R)))
+    side = 2 * FRAME_PX + GAP
+    out = Image.new("RGB", (side, side), (205, 205, 205))
+    for k, t in enumerate(tiles):
+        out.paste(Image.fromarray(t), ((k % 2) * (FRAME_PX + GAP), (k // 2) * (FRAME_PX + GAP)))
+    return np.asarray(out)
+
+
+DUAL_MOTION_R, DUAL_CLOSE_R = 12.0, 7.0      # window sizes of the two views, in kernel radii (same for every creature)
+DUAL_MOTION_PX, DUAL_CLOSE_PX = 512, 252
+DUAL_BODY_LENGTHS = 4.0                       # scale='body': the motion view spans this many body lengths
+
+
+def _onion(frames: list, weights: list, cmap: str) -> np.ndarray:
+    """Overlay frames as multiple exposures on black: each frame's colours scaled by its weight, brightest
+    wins per pixel (earlier = fainter)."""
+    out = None
+    for f, w in zip(frames, weights):
+        c = render.colorize(f, cmap).astype(np.float32) * w
+        out = c if out is None else np.maximum(out, c)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def _extent(F: list, cs: list, occupied: float = 0.05) -> float:
+    """The creature's radius in cells: largest Chebyshev distance of an occupied cell from its centroid,
+    over the frames."""
+    H, W = F[0].shape[-2:]
+    ext = 1.0
+    for f, c in zip(F, cs):
+        occ = np.argwhere(np.roll(f.sum(0), (int(round(H / 2 - c[0])), int(round(W / 2 - c[1]))), axis=(0, 1)) > occupied)
+        if len(occ):
+            ext = max(ext, float(np.abs(occ - np.array([H / 2, W / 2])).max()))
+    return ext
+
+
+def dual_image(frames: list, R: float, every: int = 2, cmap: str = "chan", scale: str = "true") -> np.ndarray:
+    """One creature in two views, side by side, every view at a fixed scale for all creatures (so neither
+    speed nor size changes the zoom):
+      left   motion: a DUAL_MOTION_R-wide window, fixed in the world, centred on the creature's mean
+             position; the creature at every `every`-th frame overlaid as multiple exposures, earlier
+             ones fainter (chronophotography); faint world grid every R
+      right  close-ups: four panels in reading order (the last four frames, in time order), each
+             centred on the creature in a DUAL_CLOSE_R-wide window: shape and shape change
+    frames: (C,H,W) arrays evenly spaced in time, oldest first (e.g. 9 frames 2 time units apart).
+    scale='body': size is taken out instead: both windows are set by the creature's own size (close-ups
+    fit the creature; the motion view spans DUAL_BODY_LENGTHS body lengths, so distance reads as body
+    lengths travelled), and no grid is drawn (grid spacing would give the scale away)."""
+    F = [np.asarray(f, np.float32) for f in frames]
+    F = [f if f.ndim == 3 else f[None] for f in F]
+    H, W = F[0].shape[-2:]
+    cs = [centroid(f.sum(0)) for f in F]
+    path = [np.array(cs[0], float)]
+    for a, b in zip(cs[:-1], cs[1:]):
+        path.append(path[-1] + np.array([torus_delta(a[0], b[0], H), torus_delta(a[1], b[1], W)]))
+    m = np.mean(path, axis=0) % np.array([H, W])
+    body = 2 * _extent(F, cs) + 2                          # body length (diameter) in cells
+    # motion view
+    n = int(min(H, W, round(DUAL_MOTION_R * R if scale == "true" else DUAL_BODY_LENGTHS * body)))
+    y0, x0 = (H - n) // 2, (W - n) // 2
+    sy, sx = int(round(H / 2 - m[0])), int(round(W / 2 - m[1]))
+    sel = list(range(0, len(F), every))
+    if sel[-1] != len(F) - 1:
+        sel.append(len(F) - 1)
+    crops = [np.roll(F[k], (sy, sx), axis=(-2, -1))[:, y0:y0 + n, x0:x0 + n] for k in sel]
+    weights = list(np.linspace(0.22, 1.0, len(crops)))
+    mot = np.asarray(Image.fromarray(_onion(crops, weights, cmap)).resize((DUAL_MOTION_PX, DUAL_MOTION_PX), Image.BILINEAR))
+    if scale == "true":
+        mot = _grid_lines(mot, n, R, offset=((sy - y0) % R, (sx - x0) % R))
+    # close-ups
+    nc = int(min(H, W, round(DUAL_CLOSE_R * R if scale == "true" else 1.15 * body)))
+    cy0, cx0 = (H - nc) // 2, (W - nc) // 2
+    tiles = []
+    for k in range(len(F) - 4, len(F)):
+        c = cs[k]
+        ry, rx = int(round(H / 2 - c[0])), int(round(W / 2 - c[1]))
+        cr = np.roll(F[k], (ry, rx), axis=(-2, -1))[:, cy0:cy0 + nc, cx0:cx0 + nc]
+        t = np.asarray(Image.fromarray(render.colorize(cr, cmap)).resize((DUAL_CLOSE_PX, DUAL_CLOSE_PX), Image.BILINEAR))
+        tiles.append(t)
+    gap = GAP
+    side = DUAL_MOTION_PX
+    out = Image.new("RGB", (side + gap + 2 * DUAL_CLOSE_PX + gap, side), (205, 205, 205))
+    out.paste(Image.fromarray(mot), (0, 0))
+    for k, t in enumerate(tiles):
+        out.paste(Image.fromarray(t), (side + gap + (k % 2) * (DUAL_CLOSE_PX + gap), (k // 2) * (DUAL_CLOSE_PX + gap)))
     return np.asarray(out)
 
 
@@ -458,7 +568,7 @@ RATE_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Rate crea
  #done{display:none;padding:40px;text-align:center;font-size:18px}
 </style></head><body>
 <header><h1>QUESTION</h1><span id="prog"></span></header>
-<div class="q">Each image shows one creature at four moments a few time units apart, in reading order. Go with your first impression.</div>
+<div class="q">DESCRIPTION Go with your first impression.</div>
 <div id="ui"><div class="pair">
  <figure id="L"><img id="li"><figcaption>left &larr;</figcaption></figure>
  <figure id="R"><img id="ri"><figcaption>right &rarr;</figcaption></figure></div>
@@ -505,7 +615,11 @@ def human_pairs(out: Path, n: int = 60, seed: int = 1, source: str = "pairs.json
     return hp
 
 
-def make_server(out: Path, n: int = 60, port: int = 8765, source: str = "pairs.json", question: str = HUMAN_QUESTION):
+HUMAN_DESCRIPTION = "Each image shows one creature at four moments a few time units apart, in reading order."
+
+
+def make_server(out: Path, n: int = 60, port: int = 8765, source: str = "pairs.json", question: str = HUMAN_QUESTION,
+                description: str = HUMAN_DESCRIPTION):
     """The rating server (localhost only); every click is appended to human.csv straight away."""
     import threading
     import time as _time
@@ -533,7 +647,8 @@ def make_server(out: Path, n: int = 60, port: int = 8765, source: str = "pairs.j
 
         def do_GET(self):
             if self.path == "/":
-                return self._send(200, RATE_PAGE.replace("QUESTION", question).replace("runs/vlmtest/human.csv", str(path)).encode(),
+                return self._send(200, RATE_PAGE.replace("QUESTION", question).replace("DESCRIPTION", description)
+                                  .replace("runs/vlmtest/human.csv", str(path)).encode(),
                                   "text/html; charset=utf-8")
             if self.path == "/pairs":
                 done = rated()
@@ -579,9 +694,9 @@ def make_server(out: Path, n: int = 60, port: int = 8765, source: str = "pairs.j
 
 
 def rate(out: Path, n: int = 60, port: int = 8765, open_browser: bool = True, source: str = "pairs.json",
-         question: str = HUMAN_QUESTION, log=print) -> None:
+         question: str = HUMAN_QUESTION, description: str = HUMAN_DESCRIPTION, log=print) -> None:
     import webbrowser
-    srv = make_server(out, n, port, source, question)
+    srv = make_server(out, n, port, source, question, description)
     url = f"http://127.0.0.1:{srv.server_address[1]}/"
     log(f"rating page: {url}  ({srv.pairs_left} of {srv.pairs_total} pairs left; answers go to "
         f"{Path(out) / 'human.csv'}; Ctrl-C to stop, progress is kept)")
