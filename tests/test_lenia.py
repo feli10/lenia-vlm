@@ -471,4 +471,19 @@ def test_pool_end_to_end(tmp_path):
         assert st["gen"] == 2 and len(st["lineages"]) == 2
     ck = rsearch.check(tmp_path / "rs-student", {"fake": j}, "curate", log=lambda *_: None)
     assert ck["curve"] and (tmp_path / "rs-student" / "lineages.png").exists()
+    # Phase 5: MAP-Elites on the same pool, both rewards, then the teacher check
+    from lenia import qd
+    for reward in ("student", "features"):
+        st = qd.run(tmp_path / f"qd-{reward}", tmp_path / "p", tmp_path / "s", tmp_path / "e",
+                    tmp_path / "p" / "distill_fake_curate", reward, iterations=3, batch_size=6, bins=4, shape=SHAPE,
+                    ranges="pool", log=lambda *_: None)
+        assert st["it"] == 3 and len(st["cells"]) > 1 and len(st["history"]) == 4
+        assert all(np.isfinite(e["nn"]) for e in st["events"])
+        assert all((tmp_path / f"qd-{reward}" / n).exists() for n in ("map.png", "elites.png", "progress.png"))
+    st2 = qd.run(tmp_path / "qd-student", tmp_path / "p", tmp_path / "s", tmp_path / "e",       # resume
+                 tmp_path / "p" / "distill_fake_curate", "student", iterations=4, batch_size=6, bins=4, shape=SHAPE,
+                 log=lambda *_: None)
+    assert st2["it"] == 4
+    qk = qd.check(tmp_path / "qd-student", {"fake": j}, "curate", n_random=5, log=lambda *_: None)
+    assert (tmp_path / "qd-student" / "check.md").exists() and qk["across"]
     assert any(set(k.split(" vs ")) == {"fake/curate", "fake2/curate"} for k in r["agreement"])

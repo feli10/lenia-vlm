@@ -17,6 +17,8 @@
   distill    Phase 3 student reward model: embed (PyTorch, Colab or Mac) | train (numpy) on the teacher's labels
   rsearch    Phase 4 search against the student (or the five-statistic reward) under the alive check:
              run (Colab) | check (teacher, needs API keys) | rate | draw
+  qd         Phase 5 MAP-Elites over size x speed against the student (or the five-statistic reward):
+             run (Colab) | check (teacher, needs API keys) | rate | draw
   bench      check the GPU simulator against numpy and time both (use with --backend auto)
   show       animated GIF of rules: from a survey (--run, --rules or --alive), from Chan's catalogue
              (--chan O2u,S1s) or a rule given as JSON (--rule); the camera follows the creature
@@ -181,6 +183,25 @@ def main(argv=None) -> int:
     p.add_argument("--children", type=int, default=3, help="mutants per lineage per generation")
     p.add_argument("--judges", default="luna,jev", help="check: judges")
     p.add_argument("--prompt", default="curate_dual", help="check: the teacher's prompt")
+    p.add_argument("--yes", action="store_true")
+    p.add_argument("--seed", type=int, default=0)
+
+    p = sub.add_parser("qd")                    # Phase 5: MAP-Elites against a reward model (see src/lenia/qd.py)
+    p.add_argument("action", choices=["run", "check", "rate", "draw"])
+    p.add_argument("--out", help="run folder (default <runs>/qd-<reward>)")
+    p.add_argument("--reward", choices=["student", "features"], default="student")
+    p.add_argument("--pool", help="labelling pool (default <runs>/pool2)")
+    p.add_argument("--student", help="trained student folder (default <pool>/distill_dinov2_vits14_curate_dual)")
+    p.add_argument("--survey", help="calibrated survey (default <runs>/found-survey-v2)")
+    p.add_argument("--archive", help="explore run the pool's search creatures came from (default <runs>/expA2-explore)")
+    p.add_argument("--iterations", type=int, default=80)
+    p.add_argument("--batch-size", type=int, default=64, help="mutants per iteration")
+    p.add_argument("--axes", default="size,speed", help="map axes: two of size, speed, change, mass")
+    p.add_argument("--bins", type=int, default=10)
+    p.add_argument("--judges", default="luna,jev", help="check: judges")
+    p.add_argument("--prompt", default="curate_dual", help="check: the teacher's prompt")
+    p.add_argument("--random-pairs", type=int, default=150, help="check: random pairs of final elites")
+    p.add_argument("--max-cells", type=int, help="check: at most this many improved cells")
     p.add_argument("--yes", action="store_true")
     p.add_argument("--seed", type=int, default=0)
 
@@ -459,6 +480,30 @@ def main(argv=None) -> int:
             rate(out, n=1000, source="human_pairs.json", question=QUESTION, description=DESCRIPTION_DUAL)
         else:
             print(rsearch.draw(out))
+        return 0
+
+    if a.cmd == "qd":
+        from . import qd
+        out = Path(a.out or runs / f"qd-{a.reward}")
+        pdir = Path(a.pool or runs / "pool2")
+        if a.action == "run":
+            qd.run(out, pdir, Path(a.survey or runs / "found-survey-v2"), Path(a.archive or runs / "expA2-explore"),
+                   Path(a.student or pdir / "distill_dinov2_vits14_curate_dual"), a.reward, a.iterations, a.batch_size,
+                   tuple(a.axes.split(",")), a.bins, seed=a.seed, shape=shape, th=th, batch=cfg["run"]["batch"])
+        elif a.action == "check":
+            from .config import REPO_ROOT
+            from .judge import Judge, load_env
+            load_env(REPO_ROOT / ".env")
+            jc = cfg["judges"]
+            judges = {n: Judge(n, {**jc.get("defaults", {}), **jc[n]}, resolve(cfg, "judge_cache"), yes=a.yes)
+                      for n in a.judges.split(",")}
+            qd.check(out, judges, a.prompt, a.random_pairs, a.max_cells, a.seed)
+        elif a.action == "rate":
+            from .pool import QUESTION, DESCRIPTION_DUAL
+            from .vlmtest import rate
+            rate(out, n=1000, source="human_pairs.json", question=QUESTION, description=DESCRIPTION_DUAL)
+        else:
+            print(qd.draw(out))
         return 0
 
     if a.cmd == "distill":

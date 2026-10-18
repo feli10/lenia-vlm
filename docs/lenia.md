@@ -929,6 +929,109 @@ statistics.
 Dry run on real creatures (CPU, 4 lineages, 2 generations, features reward): works end to end.
 Estimated cost on a T4: about an hour per 60-generation run.
 
+### Phase 4 results (2026-10-18)
+
+Both runs on Colab (about 1.8 h each), same 16 founders; teacher check on the Mac (`rsearch check`),
+Felix rated founder vs final for the student run. Curve: `docs/img/phase4_curve.png`.
+
+| gen | student run: gain | Luna p | Jev p | features run: gain | Luna p | Jev p |
+|---|---|---|---|---|---|---|
+| 5 | +0.43 | 0.56 | 0.61 | +0.21 | 0.57 | 0.58 |
+| 10 | +0.64 | 0.61 | 0.61 | +0.42 | 0.63 | 0.66 |
+| 20 | +0.93 | 0.66 | 0.69 | +0.69 | 0.66 | 0.67 |
+| 40 | +1.12 | 0.69 | 0.73 | +0.94 | 0.71 | 0.70 |
+| 60 | +1.22 | 0.72 | 0.76 | +1.12 | 0.76 | 0.76 |
+
+(gain = the run's own reward; p = P(new beats founder), unchanged lineages count as 0.5.)
+
+Against the predictions:
+1. **Size and mass climb to the alive limits: no (student), partly (features).** Median ratio to
+   founder at gen 60: student run size x1.11, mass x1.12, speed x1.68, change x1.63; features run size
+   x1.35, mass x1.45, speed x1.47, change x1.99. Neither run got near the limits, but the features
+   run's viable mutants fell from about 24 to 10 of 48 per generation while the student run's stayed
+   at 23-27: the features reward pushes toward the constraint edge, the student does not.
+2. **The teacher agrees less with later gains: no, at this pressure.** Agreement rises monotonically
+   in both runs. The student is a calibrated proxy: since its scores are Bradley-Terry logits,
+   sigmoid(gain) predicts Luna's p, and it overestimates by a steady 0.03-0.05 (0.63 vs 0.57 at gen 5,
+   0.76 vs 0.72 at gen 60); the gap does not grow. Jev, which the student never saw, agrees as much
+   (0.76) and tracks the student's per-lineage gains (r = 0.81 at gen 60), so the gains are not Luna
+   quirks. 60 generations of greedy climbing (student gain +1.2 logits) is mild pressure: this is a
+   lower bound, not evidence that the student cannot be over-optimised.
+3. **The two rewards drift differently: yes, physically; the teacher cannot tell them apart.** The
+   features reward bought its approval mostly with size and mass; the student with motion and
+   texture at modest size. Luna and Jev end at the same p for both (0.72-0.76). Where size grew more
+   than 5% Luna's mean p is 0.76-0.79; where it did not (4 student lineages, 3 features), 0.61-0.62.
+   One features lineage went backwards for the teacher (L03, p = 0.30: mass x0.68, size x1.25, change
+   x9, the features reward accepted a thinner, spread-out body); the student run's worst was 0.49.
+   The student also predicts 0.70 for the features run's final creatures, against Luna's 0.76: it
+   works as an evaluator for a search it did not drive.
+
+**Felix vs the teacher (student run, founder vs final, 16 pairs):** Felix preferred the final
+creature in 10/16, Luna in 15/16 (consistent with the 0.63-0.70 Felix-Luna agreement on pool2). The 6
+Felix rejected include the two biggest size gains (L06 x1.73, L07 x1.69) and creatures that converged
+on a round spiral/ring disc (L13; L08's ring texture). Luna's p does not predict Felix's choice (mean
+0.74 on the ones he rejected, 0.71 on the ones he kept). One rater, one pass, 16 pairs: anecdotal,
+but the visible divergence is teacher vs human, not student vs teacher.
+
+**Visual:** several lineages in both runs converge on the same attractor, a round disc with spiral or
+ring texture (student L09, L13; features L09, L12, L13, where jellyfish body plans dissolve into
+speckled discs). Greedy search loses body-plan diversity; that is the case for MAP-Elites.
+
+Implications: (a) to measure RQ1 divergence the search needs more pressure (MAP-Elites with the
+student as quality, thousands of evaluations, longer runs) and then the same teacher check; (b) the
+image student is not better than the five-statistic reward at pleasing Luna, but it is safer (no
+viability collapse, no backwards lineage) and transfers to Jev; (c) the more interesting gap is Luna
+vs a human, which points back at the teacher's size preference and the prompt arm.
+
+### Is the ensemble spread an early warning? (2026-10-18)
+
+No, not as built. On the 657 held-out pool pairs, the spread of the 5 members' predicted differences does
+not track the student's error against Luna (Spearman 0.02); the members barely differ (spread about
+0.08 against a typical margin of 1.1): bootstrapped linear heads on frozen features are near-copies.
+The 6% of pairs where members disagree on the sign are near chance (0.53 agreement vs 0.94), but those
+are just the close calls. In the searches, spread does not predict where the student overestimates
+Luna either (Spearman 0.04). What spread does show: the features-reward search moved creatures away from
+the student's training data (median spread 0.066 -> 0.102) while the student-reward search did not
+(0.066 -> 0.055). So uncertainty-aware search (LCB) is parked; Phase 5 logs a more direct measure,
+the distance to the nearest pool creature in embedding space.
+
+## Phase 5: MAP-Elites over size x speed (built 2026-10-18)
+
+`src/lenia/qd.py`, `lenia qd run | check | rate | draw`. Why: the greedy search let both rewards win mostly
+by growing (the teacher's first preference), the five-statistic reward pleased Luna as well as the
+student did, and lineages collapsed onto one round disc. Here the map's axes are size (radius of
+gyration) and speed, the teacher's first and second preferences, 10 x 10 log-spaced cells (size
+0.35-2.5 R, speed 0.003-0.5 R per unit; bins about 1.2x wide in size). A creature can only take a cell
+by being better at the same size and speed, so search pressure goes into whatever else the reward
+learned, and every within-cell comparison is size-matched, where the student is weakest (0.84 held out).
+Relation to ASAL (Kumar et al. 2024): their illumination fills a foundation-model embedding space with
+diverse creatures and their targets are prompts ("a caterpillar"); here diversity comes from interpretable
+axes and quality from a learned aesthetic judge, which is the part that is hard to write down.
+
+- **run** (Colab): seeded with all 433 pool creatures (64 of 100 cells). Each iteration: 64 parents drawn
+  uniformly from occupied cells, mutated, frozen alive check (as rsearch), rendered and scored; a viable
+  mutant takes its cell if empty or better, after the alive-at-200 confirmation. Default 80 iterations
+  (5,120 mutants, about 3 h on a T4). Logs both rewards, ensemble spread and nearest-pool distance for
+  every insertion. Resumable.
+- **check** (Mac): (1) within cells, first occupant vs the elite at checkpoints, and at the end binned by
+  student gain; (2) 150 random pairs of final elites across the map (all, and same size row): does the
+  student still rank creatures it never saw as the teacher does? Pairs for you: first occupant vs elite.
+- **draw**: map.png (elite score per cell, seed vs final), elites.png (each cell's elite in place),
+  progress.png (cells, mean elite, QD score).
+
+Predictions written down before the runs:
+1. Within cells, Luna's p falls below what the student predicts, more so for high-gain cells. Decision
+   rule: a gap of 0.10 or more in the top third of gains = over-optimisation found (RQ1 positive); within
+   0.05 everywhere = the student holds even at matched size.
+2. Within cells, the features reward does worse with Luna than the student (it can only move mass,
+   change and texture there). If it does as well, the student has not learned anything the five
+   statistics miss, at least nothing Luna rewards.
+3. Across the map, the student agrees with Luna on most random elite pairs (size still separates them),
+   less on same-size-row pairs.
+4. Coverage grows from 64 cells, but not into the large, fast corner (the alive check's limits).
+5. Distance from the pool grows with iterations; if Luna's disagreement grows with it, that distance is
+   the early-warning signal the ensemble spread is not.
+
 ## Open issues (as of 2026-10-17)
 
 **Viability (the 'alive' judge)**
@@ -1007,6 +1110,8 @@ uv run lenia --backend auto --config configs/found.yaml pool build              
 uv run --extra gpu lenia distill embed --pool runs/pool2 && uv run lenia distill train --pool runs/pool2   # Phase 3 student
 uv run lenia --backend auto --config configs/found.yaml rsearch run --reward student   # Phase 4 (Colab), also --reward features
 uv run lenia rsearch check --out runs/rsearch-student                                  # Phase 4 teacher check (API keys)
+uv run lenia --backend auto --config configs/found.yaml qd run --reward student       # Phase 5 MAP-Elites (Colab), also --reward features
+uv run lenia qd check --reward student                                                   # Phase 5 teacher check (API keys); qd rate, qd draw
 uv run lenia trace --run runs/survey-classic --rules 18,141            # a rollout's future: mass, size, speed, thumbnails
 uv run python scripts/calibrate_growth.py <explore runs...>           # growth-threshold calibration
 uv run python scripts/calibrate_rescale.py                            # resolution-check calibration (catalogue)

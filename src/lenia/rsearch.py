@@ -94,6 +94,28 @@ def pick_founders(pool_dir: Path, student_dir: Path, n: int, seed: int = 0) -> l
     return [rows[i] for i in pick]
 
 
+def viable_mutants(rules: list, starts: list, shape, th: Thresholds, batch: int, space: Space, max_dist: float,
+                   max_loss, hz1: Horizon, camera: str):
+    """The frozen alive check (alive v2), cheapest first, then the render. Returns (r1, ok, viable, rend):
+    r1 = evaluate() results for every mutant, ok = indices alive after hz1, viable = indices that also pass
+    the 2x coherence and texture checks and are still alive in the render, rend = their renders."""
+    r1 = evaluate(rules, starts, shape, hz1, th, None, batch)
+    ok = [k for k, (_, pat, _) in enumerate(r1) if pat is not None]
+    r2 = rescale_check([rules[k] for k in ok], [r1[k][1] for k in ok], shape, th, None, batch, 2, 50.0, with_pattern=True)
+    viable = []
+    for k, (cl, d2, p2) in zip(ok, r2):
+        if cl not in ALIVE or d2 is None:
+            continue
+        if float(space.dist(r1[k][2], np.asarray(d2)[None])[0]) > max_dist:
+            continue
+        if max_loss is not None and texture_loss(r1[k][1], p2) > max_loss:
+            continue
+        viable.append(k)
+    rend = _render([rules[k] for k in viable], [r1[k][1] for k in viable], shape, camera=camera)
+    keep = [j for j, (_, st, _) in enumerate(rend) if st["class"] in ALIVE]
+    return r1, ok, [viable[j] for j in keep], [rend[j] for j in keep]
+
+
 def _save(out: Path, state: dict, patterns: dict) -> None:
     tmp = out / "state.json.tmp"
     tmp.write_text(json.dumps(state))
@@ -154,21 +176,7 @@ def run(out: Path, pool_dir: Path, survey: Path, archive: Path, student_dir: Pat
         parents = [i for i in range(len(lin)) for _ in range(children)]
         rules = [mutate(Rule.from_dict(json.loads(lin[i]["rule"])), rng, mut_scale) for i in parents]
         starts = [patterns[f"L{i:02d}"] for i in parents]
-        r1 = evaluate(rules, starts, shape, hz1, th, None, batch)
-        ok = [k for k, (_, pat, _) in enumerate(r1) if pat is not None]
-        r2 = rescale_check([rules[k] for k in ok], [r1[k][1] for k in ok], shape, th, None, batch, 2, 50.0, with_pattern=True)
-        viable = []
-        for k, (cl, d2, p2) in zip(ok, r2):
-            if cl not in ALIVE or d2 is None:
-                continue
-            if float(space.dist(r1[k][2], np.asarray(d2)[None])[0]) > max_dist:
-                continue
-            if max_loss is not None and texture_loss(r1[k][1], p2) > max_loss:
-                continue
-            viable.append(k)
-        rend = _render([rules[k] for k in viable], [r1[k][1] for k in viable], shape, camera=camera)
-        keep = [j for j, (_, st, _) in enumerate(rend) if st["class"] in ALIVE]
-        viable, rend = [viable[j] for j in keep], [rend[j] for j in keep]
+        r1, ok, viable, rend = viable_mutants(rules, starts, shape, th, batch, space, max_dist, max_loss, hz1, camera)
         sc = scorer([r[0] for r in rend], [r[1] for r in rend]) if rend else None
         best = {}
         for j, k in enumerate(viable):
