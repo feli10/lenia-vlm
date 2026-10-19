@@ -4,6 +4,28 @@ Question for this phase: before any VLM call, does Lenia give us (1) a functiona
 binds without starving the search, and (2) enough visual range among the survivors for an aesthetic
 reward to matter? Everything here is simulation only; no VLM, no API cost.
 
+## Where things stand (2026-10-19): read this first
+
+The doc is a lab notebook in time order; later sections supersede earlier ones. Current pipeline:
+- **Substrate:** Chan's multi-channel found/ creatures at a common R = 20, world 256^2
+  (`configs/found.yaml`), alive v2 (alive at 100 and 200 units, coherent at 2x: descriptor distance and
+  texture loss, calibrated on the survey `found-survey-v2`).
+- **Teacher:** Luna, prompt `curate_dual`, on two-view images (motion onion-skin + 2x2 close-ups), both
+  orders averaged. Taste is lexicographic: size first, motion second; prompts barely steer it; agrees
+  with Felix about 0.70. Jev is the held-out second judge.
+- **Pool:** pool2, 433 creatures, 2,733 training / 657 held-out pairs.
+- **Student:** frozen DINOv2 ViT-S/14 (768-d over the two views) + linear Bradley-Terry head, 5-member
+  bootstrap ensemble (`distill_dinov2_vits14_curate_dual`). Baseline: the same fit on five statistics.
+- **Search results:** greedy (Phase 4) and MAP-Elites over size x speed (Phase 5): the student stays
+  calibrated to Luna, ranks unseen elites better than the five statistics (32 vs 14 discordant pairs),
+  no over-optimisation found. But all found creatures are near neighbours of the pool (section "How far
+  from the pool"), so these are results about the training neighbourhood.
+- **Next:** the mutation-operator pilot (section "Next: mutation-operator pilot"), then MAP-Elites with the
+  operators that pass and an embedding-novelty axis, then the teacher check again.
+- **Data:** run folders in Google Drive `lenia-runs/` (found-survey-v2, expA2-explore, pool2, rsearch-*,
+  qd-*, qd-gifs). Colab notebook `colab/lenia_colab.ipynb` (sections 5-9); judge calls run on the Mac
+  (API keys in `.env`).
+
 ## What's built
 
 | File | What it does |
@@ -1032,7 +1054,104 @@ Predictions written down before the runs:
 5. Distance from the pool grows with iterations; if Luna's disagreement grows with it, that distance is
    the early-warning signal the ensemble spread is not.
 
-## Open issues (as of 2026-10-17)
+### Phase 5 results (2026-10-18)
+
+Both runs on Colab (80 iterations x 64 mutants, about 2.5 h each); teacher check on the Mac; Felix rated
+24 first-vs-elite pairs from the student run (decided 15, skipped 9 as too close). GIFs of eight
+representative cells: `runs/qd-gifs/` (`scripts/qd_gifs.py`).
+
+| | student run | features run |
+|---|---|---|
+| cells filled | 64 -> 85 | 64 -> 90 |
+| improved cells (replacements per cell, mean) | 75 (2.9) | 82 (3.4) |
+| within-cell size / speed change (median) | x1.03 / x0.99 | x1.03 / x1.01 |
+| within-cell mass / change (median) | x1.03 / x1.10 | x1.13 / x1.24 |
+| other reward went down in | 37% of cells | 27% of cells |
+| Luna p (elite beats first occupant), Jev p | 0.614, 0.601 | 0.571, 0.556 |
+| student predicts | 0.612 | 0.545 |
+| across the map: student / features agree with Luna (150 pairs) | 0.91 / 0.86 | 0.94 / 0.87 |
+
+Against the predictions:
+1. **Over-optimisation within cells: not found.** The student predicts Luna's within-cell win rate almost
+   exactly at every checkpoint (0.612 vs 0.614 at the end) and in every gain tercile (top third, gains
+   +0.61 to +1.45: 0.692 vs 0.690). Jev agrees (0.68 in the top third). The decision rule (gap of 0.10 in
+   the top third) is far from met. Caveat: within-cell pressure stayed mild (mean gain +0.47, about 3
+   replacements per cell); QD spreads its effort over the map.
+2. **Features reward worse than the student within cells: in the predicted direction, not decisive.**
+   Luna 0.614 vs 0.571 (difference 0.043, bootstrap 95% CI -0.003 to 0.088), Jev 0.601 vs 0.556 (CI
+   -0.003 to 0.095). Where the two rewards point opposite ways (28 cells in the student run, 22 in the
+   features run) Luna is near a coin flip either way (0.54 and 0.54).
+3. **Across the map: yes, and the student beats the five statistics there.** On random pairs of final
+   elites the student agrees with Luna 0.91 / 0.94, the features reward 0.86 / 0.87. Pooled over both runs,
+   pairs only the student gets right vs only the features reward: 32 vs 14 for Luna (p about 0.01), 30 vs
+   16 for Jev (p about 0.05). These are creatures neither reward was trained on, including the features
+   run's own elites. Same-size-row pairs: too few (15-17) to read.
+4. **Coverage stops short of the large, fast corner: wrong.** Both runs filled it (a fast, curved,
+   holed band; the onion-skin image makes it look like a lattice).
+5. **Distance from the pool as an early warning: no.** Found elites sit at cosine distance about 0.35
+   from the nearest pool creature (seeds 0), but the distance does not predict where the student
+   overestimates Luna (Spearman 0.02 and -0.03).
+
+**Felix:** elite beats first occupant in 10 of 15 decided pairs; agreement with Luna, Jev and the student
+0.67 each; Luna's mean p is 0.65 on the pairs he accepted and 0.55 on the ones he rejected. 9 of 24 skipped:
+many within-cell changes are too small to call by eye.
+
+**In motion (GIFs):** each reward has one visible failure. The student's small slow elite (cell 2,3) sheds
+loose debris specks (the Phase 1 speckle failure creeping back; Luna still gives it 0.62). The features
+reward's huge chain (cell 9,5) breaks into separate bodies within 50 units of replay after passing the
+200-unit alive check (mass pressure at the constraint's edge). Onion-skin stills make single fast creatures
+look like segmented chains, for the judges as well as for us.
+
+Reading: the distilled student is a faithful proxy for its teacher under both greedy and QD search at the
+pressures tried, and it transfers to unseen creatures better than the five-statistic reward; what it adds
+beyond the statistics is real but modest. Over-optimisation has not been reached; the stress test needs
+much more pressure on fewer targets (long single-cell climbs or adversarial search against the student).
+
+### How far from the pool did the search get? (2026-10-19)
+
+Not far. Distances are cosine distances in the student's standardised DINOv2 embedding:
+
+| | median distance to nearest neighbour |
+|---|---|
+| pool creature to its nearest other pool creature (leave one out) | 0.31 (p90 0.53; Chan 0.34, search 0.26) |
+| found elites, student run / features run | 0.35 / 0.36 (p90 0.53) |
+| two random pool creatures | 1.02 |
+
+Found creatures sit about as far from the pool as pool creatures sit from each other: siblings, not new
+species. About 10% land beyond the pool's own 90th percentile. Ancestry: final elites are a median of 4
+mutations (max 12-15) from a pool creature; distance grows with depth only slowly (r about 0.4). The 85-90
+final elites descend from just 35 (student) / 28 (features) pool creatures; one two-armed spinner
+ancestor alone fills 13 (p0313, student run) / 19 (p0305, features run) cells. The farthest elites
+(`farthest.png` in the chat, cells 8,1 7,2 5,0 6,0 / 2,9 2,6 2,5 7,1) are visibly the same species as their
+ancestor (bigger, extra rings, rims). So "no over-optimisation" and "transfers to unseen creatures" are
+results about near neighbours of the training set.
+
+Why: a mutation (`explore.mutate`) nudges m (sigma 0.01), s (x e^0.08), r, h of about half the kernels and
+occasionally one ring, and starts the child from the parent's pattern. It never changes the number of
+kernels, the channel wiring (c0 -> c1), or combines two creatures. All creatures in the maps are Chan
+multi-channel types: (15 kernels, 3 channels), (9, 3), (4, 2). Even these small steps kill half the
+children (alive at 100 units 0.49, fully viable 0.40). Selection (alive check + reward + an incumbent
+elite per cell) pulls survivors back toward known good shapes.
+
+### Next: mutation-operator pilot (planned, not built)
+
+Question: which variation operators reach genuinely new creatures while staying viable? Turning up the
+current noise alone is expected to mostly kill (Lenia creatures live on narrow parameter islands).
+Pilot (Colab, about 15-20 min, no API calls): 64 parents from the QD maps x each operator, record the
+viable fraction and the embedding distance of survivors to their parent and to the pool.
+- current mutation at scale 1x, 2x, 4x
+- pattern mutation: same rule, new start (reseed from the seed bank, flip/cut, or merge two creatures'
+  patterns); one rule can host several creatures, and the rule stays viable
+- structural: add / remove / duplicate a kernel, rewire c0 -> c1; followed by a short local re-tune of
+  m and s (a few small-mutation steps) before judging
+- crossover: swap kernel subsets between two parents with the same (kernels, channels) layout
+Decision rule (written before running): an operator is worth using if at least 10% of children are viable
+and the median viable child is beyond 0.5 from the pool (about the pool's p90). Then: a MAP-Elites run
+with those operators and an embedding-novelty axis (e.g. size x a DINOv2 principal direction, or a
+novelty bonus), seeded from the current maps, followed by the same teacher check: the real RQ1 stress test
+on creatures unlike the training set.
+
+## Open issues (as of 2026-10-17; see "Where things stand" at the top for the current state)
 
 **Viability (the 'alive' judge)**
 - Near-static creatures pass as alive (motion/change thresholds 0.02 / 0.05 R per unit); the VLMs and

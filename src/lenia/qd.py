@@ -13,8 +13,8 @@ run     (Colab, GPU) the map: `bins` x `bins` cells over log size (radius of gyr
         renders and scores the viable mutants, and offers each to the cell its size and speed fall in:
         it takes the cell if the cell is empty or it scores higher than the elite, and is still alive at
         200 units. Quality: `student` (distilled image reward) or `features` (five-statistic reward).
-        Every insertion is stored (image, rule, both scores, the student's ensemble spread, the distance
-        to the nearest pool creature in embedding space, statistics); patterns are kept for current elites.
+        Every insertion is stored (image, rule, start pattern, both scores, the student's ensemble spread, the
+        distance to the nearest pool creature in embedding space, statistics).
         Resumable.
 check   (Mac, API keys) the teacher and a second judge on:
           within-cell: each improved cell's first occupant vs its elite at checkpoint iterations (the RQ1
@@ -205,10 +205,8 @@ def run(out: Path, pool_dir: Path, survey: Path, archive: Path, student_dir: Pat
             rend[j][0].save(out / "images" / name)
             patterns[pkey] = np.asarray(pat2, np.float32)
             kind = "improve" if c in state["cells"] else "new"
-            if kind == "improve":
-                old = state["events"][state["cells"][c][-1]]["pattern"]
-                patterns.pop(old, None)            # patterns only for current elites; images are kept for all
-                imp += 1
+            if kind == "improve":                  # replaced elites keep their pattern too (a few KB each), so any
+                imp += 1                           # creature in a cell's history can be replayed later
             else:
                 new += 1
             state["events"].append(_event(it, c, name, rules[k], pkey, sc, j, rend[j][1], kind, parent=pc[k]))
