@@ -96,8 +96,14 @@ class _Scorer:
             if self.reward == "student":
                 raise
             mean = spread = nn = np.full(n, np.nan)
+            E = None
         main = mean if self.reward == "student" else f
-        return {"main": main, "student": mean, "spread": spread, "features": f, "nn": nn}
+        return {"main": main, "student": mean, "spread": spread, "features": f, "nn": nn, "emb": E}
+
+    def unit(self, E) -> np.ndarray:
+        """Embeddings in the student's standardised space, unit length (cosine distance = 1 - dot)."""
+        X = (np.asarray(E, np.float64) - self.st.mu) / self.st.sd
+        return X / np.maximum(np.linalg.norm(X, axis=1, keepdims=True), 1e-9)
 
 
 def _event(it: int, cell: str, name: str, rule: Rule, pkey: str, sc: dict, j: int, row: dict, kind: str, parent=None, extra=None):

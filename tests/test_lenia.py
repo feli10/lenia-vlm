@@ -486,4 +486,25 @@ def test_pool_end_to_end(tmp_path):
     assert st2["it"] == 4
     qk = qd.check(tmp_path / "qd-student", {"fake": j}, "curate", n_random=5, log=lambda *_: None)
     assert (tmp_path / "qd-student" / "check.md").exists() and qk["across"]
+    # mutation-operator pilot on both maps: every operator, then resume (nothing re-run), then the CLI report
+    from lenia import operators, pilot
+    from lenia.cli import main
+    maps = [tmp_path / "qd-student", tmp_path / "qd-features"]
+    kw = dict(n_parents=4, retune_rounds=1, retune_k=2, shape=SHAPE, log=lambda *_: None)
+    pr = pilot.run(tmp_path / "pilot", maps, tmp_path / "p", tmp_path / "s", tmp_path / "p" / "distill_fake_curate", **kw)
+    assert [o["op"] for o in pr["operators"]] == list(operators.OPERATORS)
+    res = list(csv.DictReader(open(tmp_path / "pilot" / "results.csv")))
+    assert len(res) == 4 * len(operators.OPERATORS)
+    by = {o["op"]: o for o in pr["operators"]}
+    assert by["remove"]["applicable"] == 0 and by["rewire"]["applicable"] == 0     # one-kernel, one-channel creatures
+    assert by["add"]["applicable"] == 4 and by["mut1"]["applicable"] == 4 and by["remove"]["verdict"] == "n/a"
+    assert by["copy"]["verdict"] == "baseline"
+    for row in res:
+        if row["stage"] == "viable":
+            assert (tmp_path / "pilot" / "images" / row["image"]).exists() and 0 <= float(row["nn"]) <= 2
+            assert 0 <= float(row["d_nearest_parent"]) <= 2
+    assert (tmp_path / "pilot" / "sheet.png").exists() and (tmp_path / "pilot" / "report.md").exists()
+    pilot.run(tmp_path / "pilot", maps, tmp_path / "p", tmp_path / "s", tmp_path / "p" / "distill_fake_curate", **kw)
+    assert len(list(csv.DictReader(open(tmp_path / "pilot" / "results.csv")))) == len(res)
+    assert main(["pilot", "report", "--out", str(tmp_path / "pilot")]) == 0
     assert any(set(k.split(" vs ")) == {"fake/curate", "fake2/curate"} for k in r["agreement"])

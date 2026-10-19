@@ -1133,7 +1133,7 @@ multi-channel types: (15 kernels, 3 channels), (9, 3), (4, 2). Even these small 
 children (alive at 100 units 0.49, fully viable 0.40). Selection (alive check + reward + an incumbent
 elite per cell) pulls survivors back toward known good shapes.
 
-### Next: mutation-operator pilot (planned, not built)
+### Next: mutation-operator pilot (planned 2026-10-19; built, not yet run)
 
 Question: which variation operators reach genuinely new creatures while staying viable? Turning up the
 current noise alone is expected to mostly kill (Lenia creatures live on narrow parameter islands).
@@ -1150,6 +1150,30 @@ and the median viable child is beyond 0.5 from the pool (about the pool's p90). 
 with those operators and an embedding-novelty axis (e.g. size x a DINOv2 principal direction, or a
 novelty bonus), seeded from the current maps, followed by the same teacher check: the real RQ1 stress test
 on creatures unlike the training set.
+
+**Built** (`src/lenia/operators.py`, `src/lenia/pilot.py`, `lenia pilot run | report`, Colab section 10).
+Choices made while building, so the plan above stays the pre-registration:
+- Parents: 64 final elites, 32 from each map (qd-student, qd-features); all 12 operators apply to all 64
+  (35 have 15 kernels, 20 have 9, 9 have 4; all multi-channel). One child per parent per operator.
+- A `copy` row (the parent unchanged, through the same checks) as the baseline: noise floor of the distances,
+  and how often an elite passes the checks a second time. Its verdict is "baseline", not pass/fail.
+- Pattern: `reseed` (a seed-bank start at R = 20, random channel strengths), `cut` (half-plane through the
+  centre of mass wiped, soft edge), `merge` (partner with the same channel count, turned/mirrored, overlaid by
+  the cell-wise maximum). Flips were left out: Lenia is rotation- and mirror-equivariant up to the grid, so a
+  flipped start is the same creature.
+- Structural: `add` (a mutated copy of a random kernel with a random source channel, at a quarter of the
+  template's weight), `remove` (only if the target channel keeps another writer), `duplicate` (split a kernel's
+  weight between it and a copy, then mutate the copy at 2x; the split alone is the same rule, tested), `rewire`
+  (one kernel's c0, or c1 if the old target keeps another writer). No channel is ever left without a writer
+  (it would freeze). Re-tune: up to 2 rounds x 3 tries (the unchanged edit first, then m/s nudges at half the
+  usual step); the first alive at 100 units goes on to the full check.
+- Crossover: same layout (structure and T); per target channel, all its kernels from one parent (at least one
+  channel from each), since a channel's update depends only on the kernels that write to it.
+- Viable = the full frozen check, including alive at 200 units (as an elite must be). Distances as qd's `nn`:
+  cosine in the student's standardised DINOv2 embedding; "to parent" is to the nearer of two parents for merge
+  and crossover. The report also gives the pool's leave-one-out distribution, the stage at which children die,
+  re-tune cost, and the student's score change. Viable children's patterns are kept (`patterns.npz`) so the
+  next MAP-Elites run can be seeded from them.
 
 ## Open issues (as of 2026-10-17; see "Where things stand" at the top for the current state)
 
@@ -1231,6 +1255,7 @@ uv run lenia --backend auto --config configs/found.yaml rsearch run --reward stu
 uv run lenia rsearch check --out runs/rsearch-student                                  # Phase 4 teacher check (API keys)
 uv run lenia --backend auto --config configs/found.yaml qd run --reward student       # Phase 5 MAP-Elites (Colab), also --reward features
 uv run lenia qd check --reward student                                                   # Phase 5 teacher check (API keys); qd rate, qd draw
+uv run lenia --backend auto --config configs/found.yaml pilot run                       # mutation-operator pilot (Colab); pilot report anywhere
 uv run lenia trace --run runs/survey-classic --rules 18,141            # a rollout's future: mass, size, speed, thumbnails
 uv run python scripts/calibrate_growth.py <explore runs...>           # growth-threshold calibration
 uv run python scripts/calibrate_rescale.py                            # resolution-check calibration (catalogue)

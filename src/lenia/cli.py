@@ -19,6 +19,8 @@
              run (Colab) | check (teacher, needs API keys) | rate | draw
   qd         Phase 5 MAP-Elites over size x speed against the student (or the five-statistic reward):
              run (Colab) | check (teacher, needs API keys) | rate | draw
+  pilot      mutation-operator pilot: which variation operators reach new creatures and stay viable?
+             run (Colab, GPU; no API calls) | report (anywhere)
   bench      check the GPU simulator against numpy and time both (use with --backend auto)
   show       animated GIF of rules: from a survey (--run, --rules or --alive), from Chan's catalogue
              (--chan O2u,S1s) or a rule given as JSON (--rule); the camera follows the creature
@@ -203,6 +205,22 @@ def main(argv=None) -> int:
     p.add_argument("--random-pairs", type=int, default=150, help="check: random pairs of final elites")
     p.add_argument("--max-cells", type=int, help="check: at most this many improved cells")
     p.add_argument("--yes", action="store_true")
+    p.add_argument("--seed", type=int, default=0)
+
+    p = sub.add_parser("pilot")                 # mutation-operator pilot (see src/lenia/pilot.py)
+    p.add_argument("action", choices=["run", "report"])
+    p.add_argument("--out", help="run folder (default <runs>/pilot-operators)")
+    p.add_argument("--maps", default="qd-student,qd-features", help="MAP-Elites runs to draw parents from "
+                                                                   "(folders, or names under <runs>), comma-separated")
+    p.add_argument("--operators", default="all", help="comma-separated subset of: " + ",".join(
+        __import__("lenia.operators", fromlist=["x"]).OPERATORS))
+    p.add_argument("--parents", type=int, default=64)
+    p.add_argument("--retune-rounds", type=int, default=2, help="structural operators: rounds of m/s re-tune tries")
+    p.add_argument("--retune-k", type=int, default=3, help="structural operators: tries per round")
+    p.add_argument("--retune-scale", type=float, default=0.5, help="structural operators: re-tune step (x the usual m/s step)")
+    p.add_argument("--pool", help="labelling pool (default <runs>/pool2)")
+    p.add_argument("--student", help="trained student folder (default <pool>/distill_dinov2_vits14_curate_dual)")
+    p.add_argument("--survey", help="calibrated survey (default <runs>/found-survey-v2)")
     p.add_argument("--seed", type=int, default=0)
 
     p = sub.add_parser("guided")
@@ -504,6 +522,23 @@ def main(argv=None) -> int:
             rate(out, n=1000, source="human_pairs.json", question=QUESTION, description=DESCRIPTION_DUAL)
         else:
             print(qd.draw(out))
+        return 0
+
+    if a.cmd == "pilot":
+        from . import operators, pilot
+        out = Path(a.out or runs / "pilot-operators")
+        if a.action == "run":
+            pdir = Path(a.pool or runs / "pool2")
+            maps = [Path(m) if ("/" in m or Path(m).exists()) else runs / m for m in a.maps.split(",")]
+            names = operators.OPERATORS if a.operators == "all" else tuple(a.operators.split(","))
+            bad = [o for o in names if o not in operators.OPERATORS]
+            if bad:
+                ap.error(f"unknown operators {bad}; choose from {','.join(operators.OPERATORS)}")
+            pilot.run(out, maps, pdir, Path(a.survey or runs / "found-survey-v2"),
+                      Path(a.student or pdir / "distill_dinov2_vits14_curate_dual"), names, a.parents, a.retune_rounds,
+                      a.retune_k, a.retune_scale, a.seed, shape=shape, th=th, batch=cfg["run"]["batch"])
+        else:
+            pilot.report(out)
         return 0
 
     if a.cmd == "distill":

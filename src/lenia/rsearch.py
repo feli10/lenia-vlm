@@ -95,11 +95,12 @@ def pick_founders(pool_dir: Path, student_dir: Path, n: int, seed: int = 0) -> l
 
 
 def viable_mutants(rules: list, starts: list, shape, th: Thresholds, batch: int, space: Space, max_dist: float,
-                   max_loss, hz1: Horizon, camera: str):
+                   max_loss, hz1: Horizon, camera: str, r1: list | None = None):
     """The frozen alive check (alive v2), cheapest first, then the render. Returns (r1, ok, viable, rend):
     r1 = evaluate() results for every mutant, ok = indices alive after hz1, viable = indices that also pass
-    the 2x coherence and texture checks and are still alive in the render, rend = their renders."""
-    r1 = evaluate(rules, starts, shape, hz1, th, None, batch)
+    the 2x coherence and texture checks and are still alive in the render, rend = their renders.
+    Pass r1 (evaluate() at hz1, already run) to skip the first stage."""
+    r1 = r1 if r1 is not None else evaluate(rules, starts, shape, hz1, th, None, batch)
     ok = [k for k, (_, pat, _) in enumerate(r1) if pat is not None]
     r2 = rescale_check([rules[k] for k in ok], [r1[k][1] for k in ok], shape, th, None, batch, 2, 50.0, with_pattern=True)
     viable = []
