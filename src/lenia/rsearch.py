@@ -46,12 +46,13 @@ def _camera(pool_dir: Path) -> str:
     return json.loads(p.read_text()).get("camera", "fixed") if p.exists() else "fixed"
 
 
-def _render(rules: list, patterns: list, shape, chunk: int = 32, camera: str = "dual") -> list:
-    """Images (in the pool's format; two-view for pool2) and statistics: [(PIL image, stats row, final frame)]."""
+def _render(rules: list, patterns: list, shape, chunk: int = 32, camera: str = "dual", cmap: str = "chan") -> list:
+    """Images (in the pool's format; two-view for pool2) and statistics: [(PIL image, stats row, final frame)].
+    cmap only matters for one-channel creatures (several channels map straight to RGB)."""
     from .pool import _simulate
     from .vlmtest import dual_image, grid_image
-    draw = {"dual": lambda fr, R: dual_image(fr, R), "dual_body": lambda fr, R: dual_image(fr, R, scale="body"),
-            "fixed": lambda fr, R: grid_image(fr[-4:], R, False)}[camera]
+    draw = {"dual": lambda fr, R: dual_image(fr, R, cmap=cmap), "dual_body": lambda fr, R: dual_image(fr, R, cmap=cmap, scale="body"),
+            "fixed": lambda fr, R: grid_image(fr[-4:], R, False, cmap)}[camera]
     items = [("x", "x", r, np.asarray(p, np.float32) if np.asarray(p).ndim == 3 else np.asarray(p, np.float32)[None])
              for r, p in zip(rules, patterns)]
     sims = _simulate(items, shape, 30.0, chunk, lambda *_: None, 2.0, 9)

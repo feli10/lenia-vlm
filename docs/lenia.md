@@ -1175,6 +1175,26 @@ Choices made while building, so the plan above stays the pre-registration:
   re-tune cost, and the student's score change. Viable children's patterns are kept (`patterns.npz`) so the
   next MAP-Elites run can be seeded from them.
 
+## Catalogue rankings: student vs teacher (built 2026-10-20, not yet run)
+
+`src/lenia/rank.py`, `lenia rank build | label | report`, Colab section 11. What does each consider most worth
+including, and, with no search involved, does the student rank creatures as the teacher does?
+- Sets, each rendered as the pool (two-view, R = 20, 256 x 256), ranked separately (pairs only within a set):
+  `found` = all 644 living creatures of found-survey-v2 (257 in pool2: 208 train, 49 held-out; 387 never in
+  the pool; 521 pass the calibrated 2x/texture checks, flagged); `classic` = Chan's animals.json, one channel and
+  one kernel (548 species, 487 fit at R = 20), run 100 units from their own pattern, the living ones kept,
+  drawn grey on black (`--classic-cmap`). Classic vs found differs in image style as well as creature type,
+  so a gap there cannot be pinned on either alone.
+- Teacher: 8 partners per creature (about 16 comparisons each), both orders, Bradley-Terry. Split-half
+  reliability (Spearman of rankings from two random halves of the pairs, Spearman-Brown corrected) is the
+  ceiling for any scorer's agreement with it.
+- Report: per group (found: pool train / pool held-out / never in pool; classic): student, five-statistic
+  reward and "larger wins" against the teacher, as rank correlation over creatures and winner agreement on
+  decisive pairs (|p - 0.5| > 0.25), plus rank correlation with size taken out (residuals after regressing each
+  score on log size). Sheets: top and bottom 12 per scorer, raw and size-adjusted; `leaderboard.csv`.
+- Cost: about 9,000 pairs, 18,000 Luna calls; at the vlmtest rate (2,500 calls about $0.15) roughly $1-3,
+  above the judge's default $2 budget guard, so `--yes`. Smoke test first with `--limit 20`.
+
 ## Open issues (as of 2026-10-17; see "Where things stand" at the top for the current state)
 
 **Viability (the 'alive' judge)**
@@ -1256,6 +1276,7 @@ uv run lenia rsearch check --out runs/rsearch-student                           
 uv run lenia --backend auto --config configs/found.yaml qd run --reward student       # Phase 5 MAP-Elites (Colab), also --reward features
 uv run lenia qd check --reward student                                                   # Phase 5 teacher check (API keys); qd rate, qd draw
 uv run lenia --backend auto --config configs/found.yaml pilot run                       # mutation-operator pilot (Colab); pilot report anywhere
+uv run lenia --runs "$RUNS" rank label --judges luna --limit 20                         # catalogue rankings: build on Colab, label (API keys), report
 uv run lenia trace --run runs/survey-classic --rules 18,141            # a rollout's future: mass, size, speed, thumbnails
 uv run python scripts/calibrate_growth.py <explore runs...>           # growth-threshold calibration
 uv run python scripts/calibrate_rescale.py                            # resolution-check calibration (catalogue)

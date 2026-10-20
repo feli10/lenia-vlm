@@ -21,6 +21,8 @@
              run (Colab) | check (teacher, needs API keys) | rate | draw
   pilot      mutation-operator pilot: which variation operators reach new creatures and stay viable?
              run (Colab, GPU; no API calls) | report (anywhere)
+  rank       rank Chan's catalogues (found/ creatures, classic animals) by the student and by the teacher:
+             build (Colab) | label (needs API keys) | report (anywhere)
   bench      check the GPU simulator against numpy and time both (use with --backend auto)
   show       animated GIF of rules: from a survey (--run, --rules or --alive), from Chan's catalogue
              (--chan O2u,S1s) or a rule given as JSON (--rule); the camera follows the creature
@@ -221,6 +223,21 @@ def main(argv=None) -> int:
     p.add_argument("--pool", help="labelling pool (default <runs>/pool2)")
     p.add_argument("--student", help="trained student folder (default <pool>/distill_dinov2_vits14_curate_dual)")
     p.add_argument("--survey", help="calibrated survey (default <runs>/found-survey-v2)")
+    p.add_argument("--seed", type=int, default=0)
+
+    p = sub.add_parser("rank")                  # catalogue rankings (see src/lenia/rank.py)
+    p.add_argument("action", choices=["build", "label", "report"])
+    p.add_argument("--out", help="folder (default <runs>/rank-catalogue)")
+    p.add_argument("--sets", default="found,classic", help="build: found and/or classic")
+    p.add_argument("--pairs-per", type=int, default=8, help="build: partners per creature (about twice as many comparisons)")
+    p.add_argument("--classic-cmap", default="gray", help="build: colour map for one-channel creatures (gray = on black)")
+    p.add_argument("--pool", help="labelling pool (default <runs>/pool2)")
+    p.add_argument("--student", help="trained student folder (default <pool>/distill_dinov2_vits14_curate_dual)")
+    p.add_argument("--survey", help="calibrated found/ survey (default <runs>/found-survey-v2)")
+    p.add_argument("--judges", default="luna", help="label: judges, comma-separated")
+    p.add_argument("--prompt", default="curate_dual", help="label: the prompt")
+    p.add_argument("--limit", type=int, help="label: only the first n pairs (smoke test)")
+    p.add_argument("--yes", action="store_true")
     p.add_argument("--seed", type=int, default=0)
 
     p = sub.add_parser("guided")
@@ -522,6 +539,29 @@ def main(argv=None) -> int:
             rate(out, n=1000, source="human_pairs.json", question=QUESTION, description=DESCRIPTION_DUAL)
         else:
             print(qd.draw(out))
+        return 0
+
+    if a.cmd == "rank":
+        from . import rank
+        out = Path(a.out or runs / "rank-catalogue")
+        if a.action == "build":
+            pdir = Path(a.pool or runs / "pool2")
+            rank.build(out, Path(a.survey or runs / "found-survey-v2"), pdir,
+                       Path(a.student or pdir / "distill_dinov2_vits14_curate_dual"), resolve(cfg, "catalogue"),
+                       tuple(a.sets.split(",")), shape=shape, th=th, batch=cfg["run"]["batch"], pairs_per=a.pairs_per,
+                       classic_cmap=a.classic_cmap, seed=a.seed)
+        elif a.action == "label":
+            from .config import REPO_ROOT
+            from .judge import Judge, load_env
+            from .pool import label
+            load_env(REPO_ROOT / ".env")
+            jc = cfg["judges"]
+            for n in a.judges.split(","):
+                label(out, Judge(n, {**jc.get("defaults", {}), **jc[n]}, resolve(cfg, "judge_cache"), yes=a.yes), a.prompt,
+                      "all", a.limit)
+            rank.report(out)
+        else:
+            rank.report(out)
         return 0
 
     if a.cmd == "pilot":

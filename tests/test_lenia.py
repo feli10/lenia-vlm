@@ -507,4 +507,27 @@ def test_pool_end_to_end(tmp_path):
     pilot.run(tmp_path / "pilot", maps, tmp_path / "p", tmp_path / "s", tmp_path / "p" / "distill_fake_curate", **kw)
     assert len(list(csv.DictReader(open(tmp_path / "pilot" / "results.csv")))) == len(res)
     assert main(["pilot", "report", "--out", str(tmp_path / "pilot")]) == 0
+    # catalogue rankings: found + classic, student scores, fake teacher, report
+    from lenia import rank
+    animals = [{"code": "O2u", "name": "Orbium", "params": {"R": 13, "T": 10, "b": "1", "m": 0.15, "s": 0.015, "kn": 1, "gn": 1},
+                "cells": seeds.donors()["O2u"]["cells"]},
+               {"code": "O2b", "name": "Orbium b", "params": {"R": 13, "T": 10, "b": "1", "m": 0.151, "s": 0.015, "kn": 1, "gn": 1},
+                "cells": seeds.donors()["O2u"]["cells"]},
+               {"code": ">1", "name": "class: header"}]
+    (tmp_path / "animals.json").write_text(json.dumps(animals))
+    info = rank.build(tmp_path / "rank", tmp_path / "s", tmp_path / "p", tmp_path / "p" / "distill_fake_curate",
+                      tmp_path / "animals.json", shape=SHAPE, pairs_per=2, log=lambda *_: None)
+    rk = list(csv.DictReader(open(tmp_path / "rank" / "creatures.csv")))
+    assert info["creatures"]["found"] >= 2 and info["creatures"]["classic"] == 2
+    assert {r["pool_split"] for r in rk if r["set"] == "found"} <= {"train", "heldout", "new"}
+    assert any(r["in_pool"] == "True" for r in rk) and all(np.isfinite(float(r["student"])) for r in rk)
+    pr = json.loads((tmp_path / "rank" / "pairs.json").read_text())
+    sets = {r["id"]: r["set"] for r in rk}
+    assert pr and all(sets[a] == sets[b] for a, b in pr)                       # pairs only within a set
+    assert (tmp_path / "rank" / "report.md").exists()                         # student-only report before labels
+    pool.label(tmp_path / "rank", j, "curate", "all", log=lambda *_: None)
+    rr = rank.report(tmp_path / "rank", log=lambda *_: None)
+    assert "fake/curate" in rr["sets"]["found"] and "found" in rr["groups"]
+    assert (tmp_path / "rank" / "leaderboard.csv").exists() and any("size_out" in x for x in rr["sheets"])
+    assert main(["rank", "report", "--out", str(tmp_path / "rank")]) == 0
     assert any(set(k.split(" vs ")) == {"fake/curate", "fake2/curate"} for k in r["agreement"])
