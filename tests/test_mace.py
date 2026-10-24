@@ -59,8 +59,13 @@ def test_env_override(monkeypatch):
 def test_mace_torch_matches_numpy():
     torch = pytest.importorskip("torch")
     from lenia.sim import TorchBatch
+    dev = "cuda" if torch.cuda.is_available() else "cpu"
     r = with_flow(_rule3(), "mace")
     A = _world(B=1)
-    n = Batch([r], SHAPE).step(A)
-    t = TorchBatch([r], SHAPE, "cpu").step(torch.from_numpy(A)).numpy()
-    assert np.abs(n - t).max() < 1e-4
+    n, t = A, torch.from_numpy(A).to(dev)
+    nb, tb = Batch([r], SHAPE), TorchBatch([r], SHAPE, dev)
+    for _ in range(50):                        # a few steps, so mass has started to pile up
+        n, t = nb.step(n), tb.step(t)
+    t = t.cpu().numpy()
+    assert np.abs(n - t).max() < 1e-3 * max(1.0, float(n.max()))
+    assert abs(float(t.sum()) - float(A.sum())) < 1e-3 * float(A.sum())
