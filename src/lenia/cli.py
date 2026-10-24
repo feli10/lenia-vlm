@@ -138,7 +138,7 @@ def main(argv=None) -> int:
     p.add_argument("--seed", type=int, default=0)
 
     p = sub.add_parser("pool")                  # Phase 2: labelling pool (see src/lenia/pool.py)
-    p.add_argument("action", choices=["build", "label", "rate", "report", "rerender", "compare"])
+    p.add_argument("action", choices=["build", "label", "rate", "report", "rerender", "compare", "arm"])
     p.add_argument("--out", help="pool folder (default <runs>/pool)")
     p.add_argument("--from", dest="from_pool", help="rerender: source pool (default <runs>/pool); compare: the other "
                                                     "image version (default <runs>/pool)")
@@ -154,6 +154,8 @@ def main(argv=None) -> int:
     p.add_argument("--judge", default="luna", help="label: judge name (configs/lenia.yaml: judges)")
     p.add_argument("--prompt", default="curate", help="label / compare: prompt id (src/lenia/prompts.py)")
     p.add_argument("--prompt-from", help="compare: prompt used on the --from folder (default: the same as --prompt)")
+    p.add_argument("--prompts", help="arm: comma-separated prompt ids (default: prompts.RADICAL_ARM); --prompt is the base "
+                                     "(default curate_dual)")
     p.add_argument("--split", choices=["all", "train", "heldout"],
                    help="label: which pairs (default all); rerender: heldout (default) or all creatures")
     p.add_argument("--limit", type=int, help="label: only the first N pairs (smoke test)")
@@ -601,6 +603,9 @@ def main(argv=None) -> int:
         if a.action == "rerender":
             pool.rerender(Path(a.from_pool or runs / "pool"), out, Path(a.survey or runs / "found-survey-v2"),
                           Path(a.archive or runs / "expA2-explore"), a.snap, a.split or "heldout", shape, camera=a.camera, upscale=a.upscale)
+            return 0
+        if a.action == "arm":
+            pool.arm(out, a.judge, a.prompts.split(",") if a.prompts else None, a.prompt if a.prompt != "curate" else "curate_dual")
             return 0
         if a.action == "compare":
             pool.compare(Path(a.from_pool or runs / "pool"), out, a.judge, a.prompt, a.prompt_from)

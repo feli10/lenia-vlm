@@ -68,7 +68,8 @@ def mutate(rule: Rule, rng, scale: float = 1.0) -> Rule:
     multi = len(rule.kernels) > 1
     ks = [mutate_kernel(k, rng, multi, scale) if (not multi or rng.random() < 0.5) else copy.deepcopy(k)
           for k in rule.kernels]
-    return Rule(ks, R=rule.R, T=rule.T, channels=rule.channels, kn=rule.kn, gn=rule.gn)
+    return Rule(ks, R=rule.R, T=rule.T, channels=rule.channels, kn=rule.kn, gn=rule.gn,
+                flow=rule.flow, beta=rule.beta)
 
 
 def param_vector(rule: Rule) -> np.ndarray:

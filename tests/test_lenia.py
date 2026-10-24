@@ -450,6 +450,10 @@ def test_pool_end_to_end(tmp_path):
     pool.label(tmp_path / "pd", j, "curate_dual", "heldout", log=lambda *_: None)
     c2 = pool.compare(tmp_path / "p", tmp_path / "pd", "fake", "curate_dual", "curate", log=lambda *_: None)
     assert c2["b"]["prompt"] == "curate_dual" and c2["a"]["prompt"] == "curate"
+    pool.label(tmp_path / "pd", j, "cute_dual", "heldout", log=lambda *_: None)     # prompt arm report
+    arm = pool.arm(tmp_path / "pd", "fake", ["cute_dual", "weird_dual"], log=lambda *_: None)
+    assert set(arm["prompts"]) == {"curate_dual", "cute_dual"} and arm["missing"] == ["weird_dual"]
+    assert "rank_corr_base" in arm["prompts"]["cute_dual"] and "red" in arm["prompts"]["cute_dual"]["weights"]
     # Phase 3 on the same tiny pool: synthetic embeddings, train, evaluate on held-out pairs
     from lenia import distill
     ids = [r["id"] for r in csv.DictReader(open(tmp_path / "p" / "creatures.csv"))]

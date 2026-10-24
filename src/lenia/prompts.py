@@ -93,6 +93,25 @@ PROMPTS: dict[str, dict[str, str]] = {
     },
 }
 
+# Radical prompt arm (2026-10-22), all on the two-view images with the CONTEXT_DUAL framing. Does Luna have
+# an axis besides size? Five off-axis criteria, then three controls: an inverse (one axis = curate flipped),
+# a size-neutral nonsense question (does size leak in anyway = size is a default), and an explicit size
+# probe (can it read size; ceiling for size-driven agreement). `lenia pool arm` reports them.
+_RADICAL = {
+    "weird_dual": ("Which creature is weirder?", "is weirder"),
+    "satisfying_dual": ("Which creature is more satisfying to watch?", "is more satisfying to watch"),
+    "violent_dual": ("Which creature looks more violent?", "looks more violent"),
+    "cute_dual": ("Which creature is cuter?", "is cuter"),
+    "deepsea_dual": ("Which creature looks more like a deep-sea creature?", "looks more like a deep-sea creature"),
+    "ugly_dual": ("Which creature is uglier?", "is uglier"),                                    # control: inverse
+    "petrock_dual": ("Which creature would make a better pet rock?", "would make a better pet rock"),  # control: nonsense
+    "smaller_dual": ("Which creature is smaller?", "is smaller"),                               # control: size probe
+}
+for _k, (_q, _v) in _RADICAL.items():
+    PROMPTS[_k] = {"instructions": CONTEXT_DUAL + _q,
+                   "first": f"The creature in {{A}} {_v}.", "second": f"The creature in {{B}} {_v}."}
+RADICAL_ARM = list(_RADICAL)
+
 
 def get_prompt(prompt_id: str) -> dict[str, str]:
     if prompt_id not in PROMPTS:

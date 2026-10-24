@@ -33,7 +33,8 @@ from .sim import Kernel, Rule
 
 
 def _rule(rule: Rule, kernels: list) -> Rule:
-    return Rule([copy.deepcopy(k) for k in kernels], R=rule.R, T=rule.T, channels=rule.channels, kn=rule.kn, gn=rule.gn)
+    return Rule([copy.deepcopy(k) for k in kernels], R=rule.R, T=rule.T, channels=rule.channels, kn=rule.kn, gn=rule.gn,
+                flow=rule.flow, beta=rule.beta)
 
 
 def incoming(rule: Rule) -> np.ndarray:

@@ -903,6 +903,50 @@ creatures with `curate_dual`'s.
   under every prompt that keeps Luna confident. Whether a more diverse pool gives the prompts more to
   work with is open (Felix's argument).
 
+### Radical prompt arm (2026-10-22): size is Luna's default, not its taste
+
+Luna on pool2's 657 held-out pairs under eight prompts that swap only the question in the `curate_dual`
+framing (`prompts.RADICAL_ARM`; `lenia pool arm`, `scripts/radical_arm.sh`; about $1). Three are controls:
+"uglier" (inverse: if Luna has one axis, it is curate flipped), "better pet rock" (nonsense) and "smaller"
+(size probe). matched = 100 size-matched pairs (ratio < 1.1); 1st slot = P(first image wins).
+
+| prompt | order agr. | 1st slot | decisive | matched decisive | picks larger | rank corr. with curate | weights: speed, size, mass, red |
+|---|---|---|---|---|---|---|---|
+| curate_dual | 0.89 | 0.47 | 0.54 | 0.23 | 0.85 | 1.00 | +0.25, +0.67, +0.48, +0.18 |
+| satisfying | 0.81 | 0.41 | 0.35 | 0.05 | 0.83 | 0.97 | +0.08, +0.36, +0.36, +0.11 |
+| violent | 0.86 | 0.48 | 0.18 | 0.10 | 0.79 | 0.87 | +0.20, +0.49, +0.07, +0.26 |
+| deep-sea | 0.54 | 0.26 | 0.26 | 0.15 | 0.78 | 0.88 | +0.13, +0.26, +0.31, +0.10 |
+| weird | 0.55 | 0.27 | 0.31 | 0.27 | 0.74 | 0.85 | +0.25, +0.43, +0.10, +0.22 |
+| uglier (inverse) | 0.66 | 0.33 | 0.11 | 0.10 | 0.69 | **+0.64** | +0.18, +0.34, -0.05, +0.20 |
+| cute | 0.76 | 0.48 | 0.17 | 0.17 | 0.58 | **0.26** | -0.14, -0.23, +0.38, -0.12 |
+| pet rock (nonsense) | 0.80 | 0.57 | 0.20 | 0.11 | 0.21 | -0.92 | -0.19, -0.42, -0.08, -0.16 |
+| smaller (probe) | 0.89 | 0.50 | 0.21 | 0.00 | 0.11 | -0.92 | -0.12, -0.53, -0.02, -0.05 |
+
+- **The inverse is not curate flipped.** "Uglier" ranks the creatures *with* curate (+0.64), still picks the
+  larger creature 69% of the time, and on the 51 pairs decisive under both, it names the same winner 100% of
+  the time: the creature Luna would rather put in the gallery is also the uglier one. 7 of its top 12 are
+  curate's top 12 (the big fringed discs, p0402's speckled halo). So "bigger wins" is not a taste for
+  bigness; it is a magnitude default: the bigger creature has more of whatever is asked (more remarkable,
+  weirder, more violent, more deep-sea, uglier). Only questions whose literal answer is "small" (smaller,
+  pet rock) flip it, and they flip it almost exactly (-0.92).
+- **Cute is the one prompt that steers:** rank corr. 0.26, size weight negative, mass positive. Its top 12 are
+  smooth, round, solid compact blobs and rings; its bottom 12 are faint, speckled, fragmented or trailing
+  creatures. A coherent axis that is visibly not size, but Luna is unsure under it (17% decisive, 0.76 order
+  agreement), no better than curate on size-matched pairs.
+- **Weird and deep-sea are mostly position bias:** the second image wins 73-74% of the time, order agreement
+  0.54. Uglier has the same lean (0.33). Under prompts it finds odd, Luna falls back on the slot.
+- **No colour confound:** violent picks the redder creature only 45% of the time; its red weight (+0.26) is close
+  to curate's (+0.18).
+- **Even the size probe is unsure:** "which is smaller?" is right 89% of the time in direction but only 21%
+  decisive (and 0% on size-matched pairs, as it should be). Luna's probabilities are compressed on questions
+  outside its comfort zone, so "decisive" undersells the off-axis prompts somewhat; compare them with each
+  other and with the probe, not with curate's 0.54.
+
+Takeaway: on this pool, the wording does not give Luna a new confident axis; it changes the sign of the
+size default or makes Luna fall back on position. The prompt-flexibility bet is not supported for Luna
+here. Open: whether this is Luna-specific (Jev on uglier / cute is free) and whether cute is worth
+distilling despite its low confidence.
+
 ### First student (2026-10-18)
 
 DINOv2 ViT-S/14 embeddings of pool2 (motion view and close-ups, 768 dims), Bradley-Terry head on

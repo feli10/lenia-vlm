@@ -452,3 +452,129 @@ def _markdown(out: Path, s: dict) -> None:
         L += ["", f"Your ratings: {h['rated']} pairs ({h['skipped']} skipped)"
               + (f"; chan > search {h['chan_beats_search'][0]} ({h['chan_beats_search'][1]})" if h.get("chan_beats_search") else "") + "."]
     (Path(out) / "report.md").write_text("\n".join(L) + "\n")
+
+
+# ---------- arm ----------
+
+def _redness(path: Path) -> float:
+    """Share of red in the creature's pixels (background = the image's corner colour): a colour confound
+    check for prompts like 'violent'. Mean of R / (R + G + B) over pixels that differ from the background."""
+    im = np.asarray(Image.open(path).convert("RGB"), np.float32)
+    bg = im[0, 0]
+    fg = np.abs(im - bg).sum(-1) > 60
+    if not fg.any():
+        return float("nan")
+    px = im[fg]
+    return float(np.mean(px[:, 0] / (px.sum(1) + 1.0)))
+
+
+ARM_FEATURES = FEATURES + ("red",)
+
+
+def arm(out: Path, judge: str = "luna", prompts: list | None = None, base: str = "curate_dual", sheets: bool = True,
+        log=print) -> dict:
+    """Prompt arm on the held-out pairs: for each prompt, how self-consistent and sure the judge is, how much it
+    still follows size, and whether it ranks the held-out creatures differently from `base`. A prompt steers
+    only if it ranks differently (low rank corr.) AND the judge stays sure (order agreement, decisive share),
+    including on size-matched pairs. Weights: logistic regression on the standardised feature differences,
+    plus image redness. Writes arm.md / arm.json and top/bottom contact sheets per prompt."""
+    from .prompts import RADICAL_ARM
+    from .vlmtest import _contact, _spearman, bradley_terry
+    out = Path(out)
+    prompts = [base] + [p for p in (prompts or RADICAL_ARM) if p != base]
+    fl = lambda v: float(v) if v not in (None, "", "None", "nan") else np.nan
+    cre = {r["id"]: r for r in csv.DictReader(open(out / "creatures.csv"))}
+    held = sorted(i for i, r in cre.items() if r["split"] == "heldout")
+    for i in held:
+        cre[i]["red"] = _redness(out / "images" / f"{i}.png")
+    ids = sorted(cre)
+    raw = {f: np.array([fl(cre[i].get(f, np.nan)) if f != "red" else cre[i].get("red", np.nan) for i in ids], float)
+           for f in ARM_FEATURES}
+    for f in ("speed", "change", "mass"):
+        raw[f] = np.log(np.maximum(raw[f], 1e-4))
+    hidx = [ids.index(i) for i in held]
+    z = {f: (v - np.nanmean(v[hidx])) / (np.nanstd(v[hidx]) + 1e-9) for f, v in raw.items()}   # per SD of held-out creatures
+    zi = {i: k for k, i in enumerate(ids)}
+    size = lambda i: fl(cre[i]["size_rg"])
+
+    def weights(pairs, target):
+        X = np.array([[z[f][zi[a]] - z[f][zi[b]] for f in ARM_FEATURES] for a, b in pairs])
+        y = np.array([target(a, b) for a, b in pairs], float)
+        ok = np.isfinite(X).all(1) & np.isfinite(y)
+        X, y = X[ok], y[ok]
+        w = np.zeros(X.shape[1])
+        for _ in range(50):
+            p = 1 / (1 + np.exp(-X @ w))
+            w = w + np.linalg.solve(X.T @ (X * (p * (1 - p))[:, None]) + 0.1 * np.eye(len(w)), X.T @ (y - p) - 0.1 * w)
+        return {f: round(float(v), 2) for f, v in zip(ARM_FEATURES, w)}
+
+    res, pav, bt, missing = {}, {}, {}, []
+    for pr in prompts:
+        path = out / f"labels_{judge}_{pr}.csv"
+        if not path.exists():
+            missing.append(pr)
+            continue
+        L = {(r["a"], r["b"]): (fl(r["p_a_when_first"]), fl(r["p_a_when_second"]))
+             for r in csv.DictReader(open(path)) if r["split"] == "heldout"}
+        L = {k: v for k, v in L.items() if np.isfinite(v[0]) and np.isfinite(v[1])}
+        if not L:
+            missing.append(pr)
+            continue
+        P = {k: (v[0] + v[1]) / 2 for k, v in L.items()}
+        pav[pr] = P
+        bt[pr] = bradley_terry(held, [(a, b, p) for (a, b), p in P.items()])
+        keys = list(P)
+        dec = lambda ks: float(np.mean([abs(P[k] - 0.5) > 0.25 for k in ks])) if ks else float("nan")
+        matched = [k for k in keys if max(size(k[0]), size(k[1])) / max(min(size(k[0]), size(k[1])), 1e-9) < 1.1]
+        picks = lambda f: round(float(np.mean([(fl(cre[a][f]) if f != "red" else cre[a]["red"]) >
+                                               (fl(cre[b][f]) if f != "red" else cre[b]["red"]) for a, b in
+                                               [(x, y) if P[(x, y)] > 0.5 else (y, x) for x, y in keys]])), 3)
+        r = {"pairs": len(keys),
+             "order_agreement": round(float(np.mean([(v[0] > 0.5) == (v[1] > 0.5) for v in L.values()])), 3),
+             "confidence": round(float(np.mean([abs(p - 0.5) * 2 for p in P.values()])), 3),
+             "decisive": round(dec(keys), 3),
+             "picks_larger": picks("size_rg"), "picks_heavier": picks("mass"), "picks_faster": picks("speed"),
+             "picks_redder": picks("red"),
+             "size_matched": {"pairs": len(matched), "decisive": round(dec(matched), 3),
+                              "order_agreement": round(float(np.mean([(L[k][0] > 0.5) == (L[k][1] > 0.5) for k in matched])), 3)
+                              if matched else None},
+             "r_size": round(_spearman([bt[pr][i] for i in held], [size(i) for i in held]), 2),
+             "weights": weights(keys, lambda a, b: P[(a, b)])}
+        if pr != base and base in pav:
+            common = [k for k in keys if k in pav[base]]
+            both = [k for k in common if abs(P[k] - 0.5) > 0.25 and abs(pav[base][k] - 0.5) > 0.25]
+            r["same_as_base"] = round(float(np.mean([(P[k] > 0.5) == (pav[base][k] > 0.5) for k in common])), 3)
+            r["same_as_base_decisive"] = (round(float(np.mean([(P[k] > 0.5) == (pav[base][k] > 0.5) for k in both])), 3)
+                                          if both else None, len(both))
+            r["rank_corr_base"] = round(_spearman([bt[pr][i] for i in held], [bt[base][i] for i in held]), 2)
+        res[pr] = r
+        if sheets:
+            ranked = sorted(held, key=lambda i: -bt[pr][i])
+            for tag, sel in (("top", ranked[:12]), ("bottom", ranked[-12:])):
+                _contact([(f"{i} {bt[pr][i]:+.2f}", out / "images" / f"{i}.png") for i in sel],
+                         out / f"arm_{tag}_{judge}_{pr}.png", f"{judge} / {pr}: {tag} 12 held-out")
+    corr = {f"{x} vs {y}": round(_spearman([bt[x][i] for i in held], [bt[y][i] for i in held]), 2)
+            for n, x in enumerate(bt) for y in list(bt)[n + 1:]}
+    summary = {"judge": judge, "base": base, "heldout_creatures": len(held), "prompts": res, "rank_corr": corr,
+               "missing": missing}
+    (out / "arm.json").write_text(json.dumps(summary, indent=2))
+    M = [f"# Prompt arm: {judge} on the held-out pairs ({len(held)} creatures)", "",
+         f"rank corr. = Spearman of the Bradley-Terry scores with `{base}`'s; same = same winner as `{base}` "
+         "(all pairs / pairs decisive under both); matched = size-matched pairs (size ratio < 1.1); weights per SD "
+         "of the held-out creatures, positive = prefers more.", "",
+         "| prompt | order agr. | conf. | decisive | matched: n, decisive, order agr. | picks larger / heavier / faster / redder "
+         "| r(size) | rank corr. | same (all / decisive) | weights: speed, change, size, mass, texture, red |",
+         "|---|---|---|---|---|---|---|---|---|---|"]
+    for pr, r in res.items():
+        m, w = r["size_matched"], r["weights"]
+        sd = r.get("same_as_base_decisive")
+        same = f"{r['same_as_base']} / {sd[0]} ({sd[1]})" if sd else "-"
+        M.append(f"| {pr} | {r['order_agreement']} | {r['confidence']} | {r['decisive']} | {m['pairs']}, {m['decisive']}, "
+                 f"{m['order_agreement']} | {r['picks_larger']} / {r['picks_heavier']} / {r['picks_faster']} / "
+                 f"{r['picks_redder']} | {r['r_size']:+.2f} | {r.get('rank_corr_base', '-')} | {same} | " + ", ".join(f"{w[f]:+.2f}" for f in ARM_FEATURES) + " |")
+    if missing:
+        M += ["", "No labels yet: " + ", ".join(missing)]
+    M += ["", "## Rank correlations between prompts", "", "| | rho |", "|---|---|"] + [f"| {k} | {v} |" for k, v in corr.items()]
+    (out / "arm.md").write_text("\n".join(M) + "\n")
+    log((out / "arm.md").read_text())
+    return summary

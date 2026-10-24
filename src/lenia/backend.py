@@ -10,6 +10,11 @@ processes):
   auto   CUDA if available, else Apple's GPU (MPS) if its FFT works, else numpy
   cuda | mps | cpu   PyTorch on that device (cpu = PyTorch on the CPU, for testing)
 On a GPU the CLI runs one process with large batches instead of many CPU workers.
+
+LENIA_FLOW switches every batch to another update scheme without touching the rules on disk:
+  LENIA_FLOW=mace        mass-conserving MaCE update, beta from the rule (default 8)
+  LENIA_FLOW=mace:4      ... with beta = 4 for every rule
+Unset (or "growth") keeps each rule's own scheme.
 """
 from __future__ import annotations
 
@@ -84,7 +89,19 @@ def to_numpy(A) -> np.ndarray:
     return A.detach().to("cpu").numpy()
 
 
+def flow_override() -> tuple[str, float | None] | None:
+    """(flow, beta) from LENIA_FLOW, or None."""
+    v = os.environ.get("LENIA_FLOW", "").strip().lower()
+    if not v:
+        return None
+    flow, _, beta = v.partition(":")
+    return flow, (float(beta) if beta else None)
+
+
 def make_batch(rules: list, shape):
-    from .sim import Batch, TorchBatch
+    from .sim import Batch, TorchBatch, with_flow
+    fo = flow_override()
+    if fo:
+        rules = [with_flow(r, *fo) for r in rules]
     s = _resolve()
     return TorchBatch(rules, shape, s["device"]) if s["kind"] == "torch" else Batch(rules, shape)

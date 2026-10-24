@@ -7,6 +7,14 @@ and is clipped to [0, 1]. With one channel and one kernel (h = 1) this is classi
 parameters match Chan's animals.json (R, T, b, m, s, kn, gn).
 
 The world is a torus. Kernels are built around (0, 0) on the torus, so no fftshift is needed.
+
+Mass-conserving variant (rule.flow = "mace"): MaCE (Papadopoulos & Guichard 2025, arXiv 2507.12306).
+The same h-weighted growth field is used as an *affinity* A instead of being added: each cell hands
+its mass to its 3x3 Moore neighbourhood (itself included) in proportion to exp(beta * A) there,
+  Z_i = sum_{j in N(i)} exp(beta A_j),   rho'_i = exp(beta A_i) * sum_{j in N(i)} rho_j / Z_j,
+so each channel's total mass is conserved exactly and patterns cannot fizzle or explode. beta = 0 is
+pure diffusion; larger beta means sharper flow (the paper uses 8). No clipping: values can exceed 1.
+One step uses the paper's 3 dt = dx^2; T still means steps per unit of time for the bookkeeping.
 """
 from __future__ import annotations
 
@@ -57,6 +65,8 @@ class Rule:
     channels: int = 1
     kn: int = 1
     gn: int = 1
+    flow: str = "growth"           # "growth" (Lenia) or "mace" (mass-conserving, see module docstring)
+    beta: float = 8.0              # MaCE inverse temperature (unused for "growth")
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -86,7 +96,24 @@ class Rule:
 
     def structure(self) -> tuple:
         """Rules with the same structure can share a batch."""
-        return (self.channels, len(self.kernels), tuple((k.c0, k.c1) for k in self.kernels), self.kn, self.gn)
+        return (self.channels, len(self.kernels), tuple((k.c0, k.c1) for k in self.kernels), self.kn, self.gn,
+                self.flow)
+
+
+def with_flow(rule: Rule, flow: str, beta: float | None = None) -> Rule:
+    """A copy of `rule` with another update scheme, e.g. with_flow(rule, "mace", 8.0)."""
+    assert flow in ("growth", "mace"), flow
+    r = copy.deepcopy(rule)
+    r.flow = flow
+    if beta is not None:
+        r.beta = float(beta)
+    return r
+
+
+def _box3(x, roll):
+    """Sum over the 3x3 Moore neighbourhood (itself included) on the torus; roll = np.roll or torch.roll."""
+    x = x + roll(x, 1, -2) + roll(x, -1, -2)
+    return x + roll(x, 1, -1) + roll(x, -1, -1)
 
 
 def torus_dist(shape) -> np.ndarray:
@@ -135,13 +162,15 @@ class Batch:
         for i in range(self.K):
             hsum[:, self.c1[i]] += self.h[:, i, 0, 0]
         self.hsum = np.maximum(hsum, 1e-12)[:, :, None, None]
+        self.flow = r0.flow
+        self.beta = np.array([r.beta for r in rules], np.float32)[:, None, None, None]
 
     def subset(self, idx) -> "Batch":
         """The same batch restricted to worlds idx (used to drop finished rollouts)."""
         b = copy.copy(self)
         idx = np.asarray(idx)
         b.rules = [self.rules[i] for i in idx]
-        for k in ("kf", "m", "s", "h", "dt", "hsum"):
+        for k in ("kf", "m", "s", "h", "dt", "hsum", "beta"):
             setattr(b, k, getattr(self, k)[idx])
         return b
 
@@ -152,6 +181,9 @@ class Batch:
         D = np.zeros_like(A)
         for i in range(self.K):
             D[:, self.c1[i]] += G[:, i]
+        if self.flow == "mace":
+            E = np.exp(self.beta * (D / self.hsum))           # affinity = h-weighted growth
+            return (E * _box3(A / _box3(E, np.roll), np.roll)).astype(np.float32)
         return np.clip(A + self.dt * D / self.hsum, 0.0, 1.0).astype(np.float32)
 
 
@@ -185,12 +217,14 @@ class TorchBatch:
         hsum = torch.zeros(len(rules), self.C, dtype=torch.float32, device=device)
         hsum.index_add_(1, self.c1, self.h[:, :, 0, 0])
         self.hsum = hsum.clamp(min=1e-12)[:, :, None, None]
+        self.flow = r0.flow
+        self.beta = torch.tensor([r.beta for r in rules], dtype=torch.float32, device=device)[:, None, None, None]
 
     def subset(self, idx) -> "TorchBatch":
         b = copy.copy(self)
         idx_t = self.t.as_tensor(np.asarray(idx), dtype=self.t.long, device=self.device)
         b.rules = [self.rules[i] for i in np.asarray(idx)]
-        for k in ("kf", "m", "s", "h", "dt", "hsum"):
+        for k in ("kf", "m", "s", "h", "dt", "hsum", "beta"):
             setattr(b, k, getattr(self, k).index_select(0, idx_t))
         return b
 
@@ -200,6 +234,10 @@ class TorchBatch:
         U = t.fft.irfft2(self.kf * Af[:, self.c0], s=self.shape)     # (B, K, H, W)
         G = self.h * GROWTH_TORCH[self.gn](t, U, self.m, self.s)
         D = t.zeros_like(A).index_add_(1, self.c1, G)
+        if self.flow == "mace":
+            roll = lambda x, k, d: t.roll(x, k, d)
+            E = t.exp(self.beta * (D / self.hsum))
+            return E * _box3(A / _box3(E, roll), roll)
         return (A + self.dt * D / self.hsum).clamp_(0.0, 1.0)
 
 
