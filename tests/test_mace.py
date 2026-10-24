@@ -57,15 +57,24 @@ def test_env_override(monkeypatch):
 
 
 def test_mace_torch_matches_numpy():
+    """GPU (or CPU torch) vs numpy, one step at a time. MaCE is chaotic: even numpy float32 vs float64 drift
+    from 4e-6 apart after one step to a different pattern by step 30, so a long joint run is not a fair test.
+    Instead: every step from the same state must agree, at several states along a run, and the torch run
+    must conserve mass over many steps."""
     torch = pytest.importorskip("torch")
     from lenia.sim import TorchBatch
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     r = with_flow(_rule3(), "mace")
-    A = _world(B=1)
-    n, t = A, torch.from_numpy(A).to(dev)
     nb, tb = Batch([r], SHAPE), TorchBatch([r], SHAPE, dev)
-    for _ in range(50):                        # a few steps, so mass has started to pile up
-        n, t = nb.step(n), tb.step(t)
-    t = t.cpu().numpy()
-    assert np.abs(n - t).max() < 1e-3 * max(1.0, float(n.max()))
-    assert abs(float(t.sum()) - float(A.sum())) < 1e-3 * float(A.sum())
+    n = _world(B=1)
+    for t in range(60):                        # states with mass piled up (values well above 1)
+        one_t = tb.step(torch.from_numpy(n).to(dev)).cpu().numpy()
+        n = nb.step(n)
+        assert np.abs(n - one_t).max() < 1e-4 * max(1.0, float(n.max())), f"step {t}"
+    A = _world(B=1)
+    t_ = torch.from_numpy(A).to(dev)
+    for _ in range(300):
+        t_ = tb.step(t_)
+    out = t_.cpu().numpy()
+    assert out.min() >= 0
+    assert np.allclose(out.sum(axis=(-2, -1)), A.sum(axis=(-2, -1)), rtol=1e-4)
