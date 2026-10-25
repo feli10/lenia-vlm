@@ -1,0 +1,596 @@
+[
+ {
+  "id": "g000",
+  "kind": "plausible",
+  "sees": "the body has a thin outer membrane",
+  "push": "make the membrane sharper and more continuous, a clean skin around everything inside"
+ },
+ {
+  "id": "g001",
+  "kind": "plausible",
+  "sees": "the membrane is ragged or broken in places",
+  "push": "close the gaps so the membrane becomes one unbroken boundary"
+ },
+ {
+  "id": "g002",
+  "kind": "plausible",
+  "sees": "there is a membrane with a second faint layer outside it",
+  "push": "grow a distinct double wall, an inner and an outer membrane"
+ },
+ {
+  "id": "g003",
+  "kind": "plausible",
+  "sees": "the outline of the body is wavy",
+  "push": "turn the wavy outline into regular frills or scallops"
+ },
+ {
+  "id": "g004",
+  "kind": "plausible",
+  "sees": "the body is round and smooth",
+  "push": "let the outline grow protrusions that reach outwards"
+ },
+ {
+  "id": "g005",
+  "kind": "plausible",
+  "sees": "a faint ripple or halo surrounds the body",
+  "push": "make the halo into a clear ring the body sits inside, like a capsule"
+ },
+ {
+  "id": "g006",
+  "kind": "plausible",
+  "sees": "the edge of the body is a different colour from its inside",
+  "push": "make the inside and the edge into clearly distinct tissues"
+ },
+ {
+  "id": "g007",
+  "kind": "plausible",
+  "sees": "there is a bright core in the middle of the body",
+  "push": "make the core a well-defined nucleus, clearly separated from the rest"
+ },
+ {
+  "id": "g008",
+  "kind": "plausible",
+  "sees": "the core is elongated",
+  "push": "pinch the core in the middle until it splits into two"
+ },
+ {
+  "id": "g009",
+  "kind": "plausible",
+  "sees": "there are two cores inside one body",
+  "push": "pull the two cores apart until the body divides around them"
+ },
+ {
+  "id": "g010",
+  "kind": "plausible",
+  "sees": "the interior is filled with many small dots",
+  "push": "organise the dots into a regular lattice"
+ },
+ {
+  "id": "g011",
+  "kind": "plausible",
+  "sees": "the interior has small dots scattered randomly",
+  "push": "gather the dots into a few larger internal organs"
+ },
+ {
+  "id": "g012",
+  "kind": "plausible",
+  "sees": "the interior is a pattern of stripes or a maze",
+  "push": "make the stripes flow, like currents circulating inside the body"
+ },
+ {
+  "id": "g013",
+  "kind": "plausible",
+  "sees": "the interior stripes form a spiral",
+  "push": "make the spiral rotate steadily"
+ },
+ {
+  "id": "g014",
+  "kind": "plausible",
+  "sees": "the interior has concentric rings",
+  "push": "make the rings pulse outwards from the centre like a heartbeat"
+ },
+ {
+  "id": "g015",
+  "kind": "plausible",
+  "sees": "there are compartments inside the body",
+  "push": "give each compartment its own distinct contents"
+ },
+ {
+  "id": "g016",
+  "kind": "plausible",
+  "sees": "the inside looks uniform",
+  "push": "differentiate the inside into at least two kinds of region"
+ },
+ {
+  "id": "g017",
+  "kind": "plausible",
+  "sees": "small round bodies orbit or surround a larger one",
+  "push": "make the small bodies circle the large one"
+ },
+ {
+  "id": "g018",
+  "kind": "plausible",
+  "sees": "small bodies are attached to the edge of the main body",
+  "push": "make them bud off and drift away as separate cells"
+ },
+ {
+  "id": "g019",
+  "kind": "plausible",
+  "sees": "small bodies sit at the end of short stalks",
+  "push": "lengthen the stalks so the buds hang further out"
+ },
+ {
+  "id": "g020",
+  "kind": "plausible",
+  "sees": "small bodies are drifting away from the main body",
+  "push": "make the drifting bodies settle and grow into new large bodies"
+ },
+ {
+  "id": "g021",
+  "kind": "plausible",
+  "sees": "the main body releases small particles",
+  "push": "make the release rhythmic, like spores puffed out in bursts"
+ },
+ {
+  "id": "g022",
+  "kind": "plausible",
+  "sees": "small bodies are scattered around the world",
+  "push": "make the small bodies gather back together into one cluster"
+ },
+ {
+  "id": "g023",
+  "kind": "plausible",
+  "sees": "a ring of identical small cells surrounds a centre",
+  "push": "make the ring cells differ from each other in size or colour"
+ },
+ {
+  "id": "g024",
+  "kind": "plausible",
+  "sees": "small cells line up in a row",
+  "push": "grow the row into a long chain of linked cells"
+ },
+ {
+  "id": "g025",
+  "kind": "plausible",
+  "sees": "the body has several lobes",
+  "push": "make the lobes separate into individual cells that stay touching"
+ },
+ {
+  "id": "g026",
+  "kind": "plausible",
+  "sees": "the body has four lobes in a cross shape",
+  "push": "make the four lobes rotate around the centre"
+ },
+ {
+  "id": "g027",
+  "kind": "plausible",
+  "sees": "the body is made of several cells packed together",
+  "push": "arrange the cells so they form a hollow ball"
+ },
+ {
+  "id": "g028",
+  "kind": "plausible",
+  "sees": "the body is made of several cells packed together",
+  "push": "make the cells take on different roles, like an outer layer and an inner core"
+ },
+ {
+  "id": "g029",
+  "kind": "plausible",
+  "sees": "two bodies are touching",
+  "push": "fuse the two bodies into one larger body"
+ },
+ {
+  "id": "g030",
+  "kind": "plausible",
+  "sees": "two bodies are touching",
+  "push": "make the two bodies push apart and move away from each other"
+ },
+ {
+  "id": "g031",
+  "kind": "plausible",
+  "sees": "the body is pinching in the middle",
+  "push": "complete the division into two equal daughter bodies"
+ },
+ {
+  "id": "g032",
+  "kind": "plausible",
+  "sees": "a cluster of cells sits in a shared membrane",
+  "push": "make the cluster grow by adding new cells at its edge"
+ },
+ {
+  "id": "g033",
+  "kind": "plausible",
+  "sees": "the body has arms or tentacles",
+  "push": "make the arms longer and more flexible"
+ },
+ {
+  "id": "g034",
+  "kind": "plausible",
+  "sees": "the body has arms or tentacles",
+  "push": "make the arms wave or curl over time"
+ },
+ {
+  "id": "g035",
+  "kind": "plausible",
+  "sees": "the arms end in rounded tips",
+  "push": "make each arm tip grow its own small bulb or cell"
+ },
+ {
+  "id": "g036",
+  "kind": "plausible",
+  "sees": "the body has a star shape",
+  "push": "make the star's arms move like a walking starfish"
+ },
+ {
+  "id": "g037",
+  "kind": "plausible",
+  "sees": "a long tube or worm-like body",
+  "push": "make the worm crawl forwards through the world"
+ },
+ {
+  "id": "g038",
+  "kind": "plausible",
+  "sees": "a long tube that loops back on itself",
+  "push": "close the loop into a ring that rotates"
+ },
+ {
+  "id": "g039",
+  "kind": "plausible",
+  "sees": "a chain of linked cells",
+  "push": "make the chain swim with a travelling wave along its length"
+ },
+ {
+  "id": "g040",
+  "kind": "plausible",
+  "sees": "a branching structure",
+  "push": "grow more branches, like a tree or coral"
+ },
+ {
+  "id": "g041",
+  "kind": "plausible",
+  "sees": "thin strands connect separate bodies",
+  "push": "thicken the strands into channels that carry material between the bodies"
+ },
+ {
+  "id": "g042",
+  "kind": "plausible",
+  "sees": "a maze or labyrinth pattern covers a region",
+  "push": "contain the maze inside a clear boundary, like a brain inside a skull"
+ },
+ {
+  "id": "g043",
+  "kind": "plausible",
+  "sees": "a maze pattern surrounds a body",
+  "push": "make the body move through the maze without being trapped"
+ },
+ {
+  "id": "g044",
+  "kind": "plausible",
+  "sees": "a regular hexagonal or dotted texture",
+  "push": "turn the texture into a tissue of distinct cells with walls between them"
+ },
+ {
+  "id": "g045",
+  "kind": "plausible",
+  "sees": "a large textured sheet",
+  "push": "break the sheet into many separate organisms"
+ },
+ {
+  "id": "g046",
+  "kind": "plausible",
+  "sees": "stripes radiate from a centre",
+  "push": "make the stripes into rays that rotate like a wheel"
+ },
+ {
+  "id": "g047",
+  "kind": "plausible",
+  "sees": "a smooth patch of colour",
+  "push": "grow fine structure inside the patch"
+ },
+ {
+  "id": "g048",
+  "kind": "plausible",
+  "sees": "the body is not moving",
+  "push": "make it move steadily in one direction"
+ },
+ {
+  "id": "g049",
+  "kind": "plausible",
+  "sees": "the body is not moving",
+  "push": "make it rotate in place"
+ },
+ {
+  "id": "g050",
+  "kind": "plausible",
+  "sees": "the body wobbles slightly",
+  "push": "turn the wobble into a regular pulse, expanding and contracting"
+ },
+ {
+  "id": "g051",
+  "kind": "plausible",
+  "sees": "the body is moving",
+  "push": "make it move faster and in a straighter line"
+ },
+ {
+  "id": "g052",
+  "kind": "plausible",
+  "sees": "the body changes shape slowly",
+  "push": "make it change shape more boldly, like an amoeba extending pseudopods"
+ },
+ {
+  "id": "g053",
+  "kind": "plausible",
+  "sees": "parts of the body move independently",
+  "push": "coordinate the parts so they move together as one organism"
+ },
+ {
+  "id": "g054",
+  "kind": "plausible",
+  "sees": "several bodies move around",
+  "push": "make the bodies move together as a swarm"
+ },
+ {
+  "id": "g055",
+  "kind": "plausible",
+  "sees": "several bodies move around",
+  "push": "make the bodies chase one another"
+ },
+ {
+  "id": "g056",
+  "kind": "plausible",
+  "sees": "a body moves near smaller bodies",
+  "push": "make it engulf the smaller bodies as it passes"
+ },
+ {
+  "id": "g057",
+  "kind": "plausible",
+  "sees": "the world looks almost the same in all snapshots",
+  "push": "make something happen: growth, motion or division"
+ },
+ {
+  "id": "g058",
+  "kind": "plausible",
+  "sees": "everything is changing chaotically",
+  "push": "calm the chaos into a few stable, recognisable bodies"
+ },
+ {
+  "id": "g059",
+  "kind": "plausible",
+  "sees": "the body is nearly symmetric",
+  "push": "make the symmetry exact, like a radiolarian or snowflake"
+ },
+ {
+  "id": "g060",
+  "kind": "plausible",
+  "sees": "the body is symmetric",
+  "push": "break the symmetry so it has a front and a back"
+ },
+ {
+  "id": "g061",
+  "kind": "plausible",
+  "sees": "the body is irregular and lumpy",
+  "push": "give it a recognisable overall shape"
+ },
+ {
+  "id": "g062",
+  "kind": "plausible",
+  "sees": "the body is very small",
+  "push": "grow it larger while keeping its internal detail"
+ },
+ {
+  "id": "g063",
+  "kind": "plausible",
+  "sees": "the body is large and simple",
+  "push": "add more internal detail and parts"
+ },
+ {
+  "id": "g064",
+  "kind": "plausible",
+  "sees": "the colours are mostly one channel",
+  "push": "bring in the other colours as distinct structures"
+ },
+ {
+  "id": "g065",
+  "kind": "plausible",
+  "sees": "the colours are mixed together",
+  "push": "separate the colours into distinct parts of the body"
+ },
+ {
+  "id": "g066",
+  "kind": "plausible",
+  "sees": "the world has one body",
+  "push": "make the body produce a second, similar body"
+ },
+ {
+  "id": "g067",
+  "kind": "plausible",
+  "sees": "the world has many similar bodies",
+  "push": "make some of the bodies different from the others"
+ },
+ {
+  "id": "g068",
+  "kind": "plausible",
+  "sees": "the world has many different bodies",
+  "push": "make the different kinds of body interact"
+ },
+ {
+  "id": "g069",
+  "kind": "leap",
+  "sees": "the body looks a bit like an eye",
+  "push": "make it unmistakably an eye with an iris and pupil"
+ },
+ {
+  "id": "g070",
+  "kind": "leap",
+  "sees": "the body looks a bit like a flower",
+  "push": "make it bloom: petals opening around a centre"
+ },
+ {
+  "id": "g071",
+  "kind": "leap",
+  "sees": "the body looks a bit like a jellyfish",
+  "push": "give it a bell and trailing tentacles that pulse"
+ },
+ {
+  "id": "g072",
+  "kind": "leap",
+  "sees": "the body looks a bit like an octopus",
+  "push": "make the arms grasp at nearby bodies"
+ },
+ {
+  "id": "g073",
+  "kind": "leap",
+  "sees": "the body looks a bit like a seed or egg",
+  "push": "make it hatch: break open and release something inside"
+ },
+ {
+  "id": "g074",
+  "kind": "leap",
+  "sees": "the body looks a bit like a planet or moon",
+  "push": "give it orbiting moons and rings"
+ },
+ {
+  "id": "g075",
+  "kind": "leap",
+  "sees": "the body looks a bit like a galaxy",
+  "push": "make it a spiral galaxy with turning arms"
+ },
+ {
+  "id": "g076",
+  "kind": "leap",
+  "sees": "the body looks a bit like a virus",
+  "push": "give it surface spikes and make it latch onto other bodies"
+ },
+ {
+  "id": "g077",
+  "kind": "leap",
+  "sees": "the body looks a bit like a snowflake",
+  "push": "grow intricate branching arms in six-fold symmetry"
+ },
+ {
+  "id": "g078",
+  "kind": "leap",
+  "sees": "the body looks a bit like a footprint or handprint",
+  "push": "make it walk across the world leaving a trail"
+ },
+ {
+  "id": "g079",
+  "kind": "leap",
+  "sees": "the body looks a bit like a face",
+  "push": "give it two eyes and a mouth that opens and closes"
+ },
+ {
+  "id": "g080",
+  "kind": "leap",
+  "sees": "the body looks a bit like a coral or sponge",
+  "push": "grow it into a reef that other small bodies live in"
+ },
+ {
+  "id": "g081",
+  "kind": "leap",
+  "sees": "the body looks a bit like a bacterium",
+  "push": "give it a flagellum that drives it forward"
+ },
+ {
+  "id": "g082",
+  "kind": "leap",
+  "sees": "the body looks a bit like a brain",
+  "push": "make waves of activity sweep across its folds"
+ },
+ {
+  "id": "g083",
+  "kind": "leap",
+  "sees": "the body looks a bit like a city seen from above",
+  "push": "grow roads connecting separate districts"
+ },
+ {
+  "id": "g084",
+  "kind": "leap",
+  "sees": "the scene looks a bit like a pond seen under a microscope",
+  "push": "fill it with distinct species doing different things"
+ },
+ {
+  "id": "g085",
+  "kind": "leap",
+  "sees": "the body looks a bit like a heart",
+  "push": "make it beat in a steady rhythm"
+ },
+ {
+  "id": "g086",
+  "kind": "leap",
+  "sees": "the body looks a bit like a tree seen from above",
+  "push": "grow a trunk and a canopy of branches"
+ },
+ {
+  "id": "g087",
+  "kind": "leap",
+  "sees": "the body looks a bit like a crab or insect",
+  "push": "give it legs that move in sequence"
+ },
+ {
+  "id": "g088",
+  "kind": "leap",
+  "sees": "the body looks a bit like a nest",
+  "push": "make small bodies gather inside it"
+ },
+ {
+  "id": "g089",
+  "kind": "leap",
+  "sees": "the body looks a bit like a lantern",
+  "push": "make light seem to pulse from its centre"
+ },
+ {
+  "id": "g090",
+  "kind": "leap",
+  "sees": "the scene looks a bit like an ecosystem",
+  "push": "show predator and prey: some bodies hunting others"
+ },
+ {
+  "id": "g091",
+  "kind": "leap",
+  "sees": "two bodies look like a pair",
+  "push": "make them dance around each other"
+ },
+ {
+  "id": "g092",
+  "kind": "leap",
+  "sees": "the body looks a bit like a mouth",
+  "push": "make it open and swallow nearby material"
+ },
+ {
+  "id": "g093",
+  "kind": "control",
+  "sees": "the image contains written letters",
+  "push": "make the letters spell a word"
+ },
+ {
+  "id": "g094",
+  "kind": "control",
+  "sees": "a car is visible",
+  "push": "add wheels and headlights to the car"
+ },
+ {
+  "id": "g095",
+  "kind": "control",
+  "sees": "a human person is standing in the scene",
+  "push": "make the person wave"
+ },
+ {
+  "id": "g096",
+  "kind": "control",
+  "sees": "the image shows a city skyline at night",
+  "push": "add more lit windows to the buildings"
+ },
+ {
+  "id": "g097",
+  "kind": "control",
+  "sees": "a bar chart is visible",
+  "push": "make the bars taller"
+ },
+ {
+  "id": "g098",
+  "kind": "control",
+  "sees": "the image shows a page of sheet music",
+  "push": "add more notes to the staff"
+ }
+]

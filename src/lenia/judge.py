@@ -75,6 +75,14 @@ class Query:
     sample: int = 0
 
 
+@dataclass
+class ChoiceQuery:
+    image: np.ndarray      # (H, W, 3) uint8
+    instructions: str      # "{W}" is replaced by the backend's name for the image
+    options: dict          # option id -> description, in the order shown
+    sample: int = 0
+
+
 def load_env(path) -> None:
     """Put KEY=value lines from a .env file into os.environ (existing variables win). Values are not echoed."""
     try:
@@ -205,6 +213,87 @@ class Judge:
         if n_fail:
             self.log(f"[{desc}] WARNING: {n_fail} queries failed (not cached; re-run to retry)")
         return final
+
+    # -- multiple choice: one image, a menu of options
+    def choose_many(self, queries: list, desc: str = "choose") -> list:
+        """queries: [ChoiceQuery]. Returns [dict option id -> probability, or None if the call failed]."""
+        keys = []
+        for q in queries:
+            payload = {"backend": self.backend, "model": self.model, "kind": "choice", "instructions": q.instructions,
+                       "options": list(q.options.items()), "img": image_hash(q.image), "sample": q.sample}
+            keys.append(hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest())
+        out = [self.cache.get(k) for k in keys]
+        todo = [i for i, v in enumerate(out) if v is None]
+        est = len(todo) * float(self.cfg.get("est_cost_per_call_usd", 0))
+        self.log(f"[{desc}] {len(queries)} queries: {len(queries) - len(todo)} cached, {len(todo)} new (est. ${est:.3f})")
+        if est > float(self.cfg.get("budget_usd", 2)) and not self.yes:
+            raise BudgetError(f"estimated ${est:.2f} exceeds budget_usd; re-run with --yes")
+        if todo and self.backend != "fake" and not self._key_value():
+            raise FatalAPIError(f"{KEY_ENV[self.backend]} is not set (put it in .env)")
+        res = {}
+        if todo:
+            workers = 1 if self.backend == "fake" else int(self.cfg.get("max_workers", 8))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = {ex.submit(self._choose, queries[i], keys[i]): i for i in todo}
+                for n, fut in enumerate(as_completed(futs), 1):
+                    i = futs[fut]
+                    v = fut.result()
+                    if v.ok:
+                        self.cache.put(keys[i], v, self.model, "choice")
+                    elif n <= 3:
+                        self.log(f"[{desc}] failed call: {v.raw[:300]}")
+                    self.spent += v.cost
+                    res[i] = v
+        final = [res.get(i, v) for i, v in enumerate(out)]
+        probs = []
+        for v in final:
+            try:
+                probs.append(json.loads(v.raw)["probs"] if v is not None and v.ok else None)
+            except (ValueError, KeyError, TypeError):
+                probs.append(None)
+        n_fail = sum(p is None for p in probs)
+        if n_fail:
+            self.log(f"[{desc}] WARNING: {n_fail} queries failed (not cached; re-run to retry)")
+        return probs
+
+    def _choose(self, q, key: str) -> "Verdict":
+        ids = list(q.options)
+        if self.backend == "fake":                 # deterministic, image-dependent, with a first-option bias
+            rng = random.Random(key)
+            h = int(image_hash(q.image)[:6], 16)
+            logits = [rng.gauss(0, 1) + (1.0 if j == 0 else 0) + (1.5 if (h + j) % len(ids) == 0 else 0) for j in range(len(ids))]
+            z = [math.exp(x) for x in logits]
+            pr = {o: z[j] / sum(z) for j, o in enumerate(ids)}
+            return Verdict(1.0, "first", json.dumps({"probs": pr}), 0.0)
+        api_key = self._key_value()
+        crit = {o: t for o, t in q.options.items()}
+        if self.backend == "decisions":
+            img = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + png_b64(q.image)}}
+            body = {"model": self.model, "state": ["World:", img],
+                    "questions": {"match": {"type": "choice", "instructions": q.instructions.replace("{W}", "the image"),
+                                            "criteria": crit}}}
+            data = self._post(DECISIONS_URL, body, {"Authorization": f"Bearer {api_key}", "X-Title": "lenia-vlm"})
+            cost_of = lambda d: float((d.get("usage") or {}).get("cost") or 0)
+        else:
+            rid = str(uuid.UUID(hex=image_hash(q.image).ljust(32, "0")))
+            body = {"model": self.model, "state": {"world": rid},
+                    "assets": {rid: {"type": "image", "format": "png", "data_base64": png_b64(q.image)}},
+                    "questions": {"match": {"type": "choice", "instructions": q.instructions.replace("{W}", "`world`"),
+                                            "criteria": crit}}}
+            data = self._post(JEV_URL, body, {"Authorization": f"Bearer {api_key}", "TypeSafe-Danger-Zone-Images": "true"})
+            cost_of = lambda d: float((d.get("usage") or {}).get("input_tokens") or 0) * JEV_USD_PER_TOKEN
+        if "_error" in data:
+            return Verdict(None, None, data["_error"])
+        ans = (data.get("answers") or {}).get("match") or {}
+        probs = {o: float(v or 0) for o, v in (ans.get("probabilities") or {}).items() if o in crit}
+        if sum(probs.values()) <= 0:
+            if ans.get("choice") in crit:
+                probs = {o: float(o == ans["choice"]) for o in crit}
+            else:
+                return Verdict(None, None, json.dumps(data)[:2000])
+        tot = sum(probs.values())
+        probs = {o: probs.get(o, 0.0) / tot for o in crit}
+        return Verdict(1.0, "first", json.dumps({"probs": probs, "choice": ans.get("choice")}), cost_of(data))
 
     # -- internals
     def _post(self, url: str, body: dict, headers: dict) -> dict:
