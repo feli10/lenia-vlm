@@ -42,7 +42,9 @@ inherited, so elite and challenger are always the same age.
   scored when they enter and the whole archive is re-scored every --surprise-every iterations, so "unusual"
   always means unusual relative to what the archive holds now. A share --surprise-mix of parents is still drawn
   uniformly; the rest with probability proportional to exp(score / --surprise-temp). Surprise only decides where
-  to search; entry into a cell is still the complexity duel against the incumbent.
+  to search; entry into a cell is still the complexity duel against the incumbent. --surprise-ref other-lineages
+  draws the opponents only from other seed lineages, so a lineage that spreads over many cells is not made
+  "typical" by its own relatives and keeps being refined.
 Saves state after every iteration (resumes) and a snapshot of the maps every --snapshot-every iterations.
 """
 from __future__ import annotations
@@ -78,7 +80,7 @@ def settings(st: dict) -> argparse.Namespace:
     a = argparse.Namespace(**{"axes": ["bodies", "motion"], "body_edges": BODY_EDGES, "islands": 1,
                               "migrate_every": 10, "form_bins": 4, "embed_model": "dinov2_vits14",
                               "parent_select": "uniform", "surprise_opponents": 6, "surprise_every": 20,
-                              "surprise_mix": 0.5, "surprise_temp": 0.1, **st["args"]})
+                              "surprise_mix": 0.5, "surprise_temp": 0.1, "surprise_ref": "all", **st["args"]})
     if isinstance(a.axes, str):
         a.axes = a.axes.split(",")
     return a
@@ -287,6 +289,10 @@ def score_surprise(st: dict, which: list, judge, out: Path, rng, a, desc: str) -
     qs, meta = [], []
     for k, ck in which:
         others = [x for x in allk if x != (k, ck)]
+        if a.surprise_ref == "other-lineages":            # judge a lineage only against other lineages, so its own
+            root = islands_of(st)[k][ck].get("root")      # relatives filling the map do not make it "typical"
+            diff = [x for x in others if islands_of(st)[x[0]][x[1]].get("root") != root]
+            others = diff if len(diff) >= a.surprise_opponents else others
         for j in rng.choice(len(others), min(a.surprise_opponents, len(others)), replace=False):
             o = others[int(j)]
             qs += [Query(SURPRISE, pic(k, ck), pic(*o)), Query(SURPRISE, pic(*o), pic(k, ck))]
@@ -567,6 +573,8 @@ def main() -> None:
     r.add_argument("--surprise-every", type=int, default=20, help="re-score the whole archive every N iterations")
     r.add_argument("--surprise-mix", type=float, default=0.5, help="share of parents still drawn uniformly")
     r.add_argument("--surprise-temp", type=float, default=0.1)
+    r.add_argument("--surprise-ref", default="all", choices=["all", "other-lineages"],
+                   help="opponents for the surprise duel: any elite (v3), or only elites of other seed lineages")
     r.add_argument("--seed", type=int, default=0)
     m = sub.add_parser("map")
     m.add_argument("--out", required=True)
