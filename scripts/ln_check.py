@@ -4,7 +4,7 @@ Step 0 (their code, unmodified): clone github.com/Zhangyanbo/learnable-novelty a
 rule 110 should come out on top, about 63 bits (their Fig. 2). Colab section 15 does this.
 
   python scripts/ln_check.py equiv  --upstream /content/learnable-novelty     # our copy + 2D reservoir = theirs
-  python scripts/ln_check.py sanity --out RUNS/ln-sanity --elites-from RUNS/mace-qd2 --backend auto
+  python scripts/ln_check.py sanity --out RUNS/ln-sanity2 --elites-from RUNS/mace-qd2 --backend auto
 
 equiv: (1) the vendored rc_epiplexity is byte-identical to the upstream commit; (2) RCEpiplexity2D, with each
 1D kernel copied into the middle row of a 2D kernel, gives the same score as their RCEpiplexity1D on their
@@ -16,6 +16,11 @@ multichannel continuous substrate, so these are ours):
   down (average-pool factor, i.e. how coarsely the reservoir sees): 1, 2, 4
   depth (reservoir layers; receptive-field radius depth-1 cells after pooling): 3, 4
   y_scale: raw (their fixed sigma_y = 1, on mass density) | std (each world's targets scaled to unit std)
+  rows: all sites (as the paper) | occupied (4,000 rows from sites with mass; ours, see below)
+v2 (after v1, runs/ln-sanity, ranked i.i.d. noise and grid confetti above every creature in all 36 settings) adds
+two controls of ours: (1) a shuffled null, the same rows with the targets permuted across rows, subtracted from S
+(the readout's chance fit grows with the target's scale; i.i.d. noise scores ~18 bits even in their own ECA
+setup); (2) occupied-site rows, so a creature on a mostly empty grid is not diluted by background rows.
 Fixed from the paper: 256 channels, kernel 3, ELU, pre-activation norm, ridge 0.3, eta 1, tau 8, 3 reservoir
 draws per score. Worlds (4 rules each, 16 smoothed-noise starts each, 1500 warmup steps):
   noise     i.i.d. uniform X and Y (the "noisy TV"; no simulation)          expected ~0
@@ -46,7 +51,7 @@ from lenia.explore import texture
 from lenia.sample import sample
 from lenia.sim import Rule, with_flow
 
-GRID = {"dt": [1, 10, 50], "down": [1, 2, 4], "depth": [3, 4], "y_scale": ["raw", "std"]}
+GRID = {"dt": [1, 10, 50], "down": [1, 2, 4], "depth": [3, 4], "y_scale": ["raw", "std"], "rows": ["all", "occupied"]}
 ORDER = ["noise", "diffusion", "confetti", "frozen", "founders", "active", "copy"]
 
 
@@ -114,8 +119,8 @@ def sanity(a) -> None:
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     dev = device()
-    settings = [EP.Setting(dt=d, down=w, depth=p, y_scale=y)
-                for d, w, p, y in itertools.product(GRID["dt"], GRID["down"], GRID["depth"], GRID["y_scale"])]
+    settings = [EP.Setting(dt=d, down=w, depth=p, y_scale=y, rows=r)
+                for d, w, p, y, r in itertools.product(*GRID.values())]
     times = EP.times_for(settings)
     cls, starts, meta = worlds(a)
     res = json.loads((out / "sanity.json").read_text()) if (out / "sanity.json").exists() else {"scores": {}, "meta": meta}
@@ -138,8 +143,7 @@ def sanity(a) -> None:
                 continue
             res["scores"][name] = {"class": c, "texture": round(tex, 4), "S": {}}
             for s in settings:
-                m, sd = EP.score(fr, times, s, runs=a.runs, device=dev)
-                res["scores"][name]["S"][s.key()] = [round(m, 3), round(sd, 3)]
+                res["scores"][name]["S"][s.key()] = EP.score(fr, times, s, runs=a.runs, device=dev)
             (out / "sanity.json").write_text(json.dumps(res, indent=1))
             print(f"{name}: done ({time.time() - t0:.0f}s)", file=sys.stderr)
     rng = np.random.default_rng(0)
@@ -150,8 +154,7 @@ def sanity(a) -> None:
             name = f"{c}_{i}"
             res["scores"][name] = {"class": c, "texture": None, "S": {}}
             for s in settings:
-                m, sd = EP.score(fr, times, s, runs=a.runs, device=dev)
-                res["scores"][name]["S"][s.key()] = [round(m, 3), round(sd, 3)]
+                res["scores"][name]["S"][s.key()] = EP.score(fr, times, s, runs=a.runs, device=dev)
     res["settings"] = [s.as_dict() for s in settings]
     (out / "sanity.json").write_text(json.dumps(res, indent=1))
     render.sheet(sheet, cols=4, title="ln-sanity worlds (burned-in state, first start)").save(out / "worlds.png")
@@ -162,19 +165,33 @@ def report(out: Path, res: dict, settings: list) -> None:
     by = {}
     for name, r in res["scores"].items():
         by.setdefault(r["class"], []).append(r)
-    L = ["# Learnable novelty on MaCE: sanity check\n",
-         "Mean S (bits) per class of worlds, under every setting. Expected order: noise, diffusion ~ 0; confetti, "
-         "frozen low; active high. `ok` = active above every other class.\n",
-         "| setting | " + " | ".join(c for c in ORDER if c in by) + " | ok |", "|---|" + "---|" * (len([c for c in ORDER if c in by]) + 1)]
-    oks = 0
-    for s in settings:
-        k = s.key()
-        means = {c: float(np.mean([r["S"][k][0] for r in by[c]])) for c in ORDER if c in by}
-        ok = all(means["active"] > v for c, v in means.items() if c not in ("active", "copy"))
+    cl = [c for c in ORDER if c in by]
+    L = ["# Learnable novelty on MaCE: sanity check (v2: shuffled null, occupied sites)\n",
+         "Per class of worlds, mean **net** S = S - null (bits): S is their estimator; the null is the same rows "
+         "with the targets shuffled across rows (what the readout fits by chance). `_occ` settings score "
+         f"{EP.OCC_ROWS} rows from occupied sites only. Expected: noise, diffusion ~ 0; confetti, frozen low; "
+         "active high. `ok` = active above noise, diffusion, confetti and frozen.\n",
+         "| setting | " + " | ".join(cl) + " | ok |", "|---|" + "---|" * (len(cl) + 1)]
+    oks, okocc, nocc = 0, 0, 0
+    for st in settings:
+        k = st.key()
+        means = {c: float(np.mean([r["S"][k]["net"][0] for r in by[c]])) for c in cl}
+        ok = all(means["active"] > means[c] for c in ("noise", "diffusion", "confetti", "frozen") if c in means)
         oks += ok
-        L.append(f"| {k} | " + " | ".join(f"{means[c]:.1f}" for c in ORDER if c in by) + f" | {'yes' if ok else 'no'} |")
-    L += ["", f"Active above all other simulated/noise classes in {oks}/{len(settings)} settings.", "",
-          f"Frozen elites' motion {res['meta']['frozen_motion']}, active {res['meta']['active_motion']}."]
+        if st.rows == "occupied":
+            nocc += 1
+            okocc += ok
+        L.append(f"| {k} | " + " | ".join(f"{means[c]:.1f}" for c in cl) + f" | {'yes' if ok else 'no'} |")
+    L += ["", f"ok in {oks}/{len(settings)} settings ({okocc}/{nocc} of the occupied-site ones).", "",
+          "Raw S and null for a few settings (class means):", "",
+          "| setting | " + " | ".join(f"{c} S / null" for c in cl) + " |", "|---|" + "---|" * len(cl)]
+    for st in settings:
+        if st.dt == 10 and st.depth == 4 and st.down == 2:
+            k = st.key()
+            L.append(f"| {k} | " + " | ".join(
+                f"{np.mean([r['S'][k]['S'][0] for r in by[c]]):.1f} / {np.mean([r['S'][k]['null'][0] for r in by[c]]):.1f}"
+                for c in cl) + " |")
+    L += ["", f"Frozen elites' motion {res['meta']['frozen_motion']}, active {res['meta']['active_motion']}."]
     (out / "sanity.md").write_text("\n".join(L) + "\n")
     print("\n".join(L))
 
@@ -183,7 +200,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["equiv", "sanity", "report"])
     ap.add_argument("--upstream", default="/content/learnable-novelty")
-    ap.add_argument("--out", default="runs/ln-sanity")
+    ap.add_argument("--out", default="runs/ln-sanity2")
     ap.add_argument("--elites-from", default="runs/mace-qd2")
     ap.add_argument("--backend", default="auto")
     ap.add_argument("--size", type=int, default=160)

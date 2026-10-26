@@ -33,6 +33,8 @@ CHANNELS = 256               # their reservoir width for CA data
 KERNEL = 3
 RIDGE = 0.3                  # their inverse-NCA ridge (ECA ranking: 0.03)
 ROWS = 25_600                # ridge rows per score: one 160x160 world (ECA: 512 x 64 = 32,768)
+OCC_ROWS = 4_000             # rows per score when only occupied sites are used (~ one creature's area at 160x160)
+OCC_FRAC = 0.05              # a site is occupied if its mass exceeds this share of the world's peak (as mace_qd coverage)
 
 
 @dataclass(frozen=True)
@@ -41,11 +43,12 @@ class Setting:
     down: int = 1
     depth: int = 4
     y_scale: str = "raw"
+    rows: str = "all"            # "all" sites (as the paper) | "occupied": OCC_ROWS rows from sites with mass (ours)
     tau: int = TAU
     ridge: float = RIDGE
 
     def key(self) -> str:
-        return f"dt{self.dt}_down{self.down}_depth{self.depth}_{self.y_scale}"
+        return f"dt{self.dt}_down{self.down}_depth{self.depth}_{self.y_scale}" + ("_occ" if self.rows == "occupied" else "")
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -137,7 +140,8 @@ def times_for(settings: list) -> list:
 
 
 def xy(frames: np.ndarray, times: list, s: Setting):
-    """(B, T, C, H, W) frames -> X (B, C, h, w), Y (B, C * tau, h, w) for setting s (average-pooled by s.down)."""
+    """(B, T, C, H, W) frames -> X (B, C, h, w), Y (B, C * tau, h, w) for setting s (average-pooled by s.down),
+    and the occupied sites (B, h, w): mass above OCC_FRAC of the world's peak in X or in any target frame."""
     idx = [times.index(s.dt * k) for k in range(1, s.tau + 1)]
     X = frames[:, times.index(0)]
     Y = frames[:, idx]                                            # (B, tau, C, H, W)
@@ -147,24 +151,50 @@ def xy(frames: np.ndarray, times: list, s: Setting):
         X = X.reshape(B, C, H // d, d, W // d, d).mean((3, 5))
         Y = Y.reshape(B, T, C, H // d, d, W // d, d).mean((4, 6))
     B, T, C, h, w = Y.shape
+    mass = np.maximum(X.sum(1), Y.sum(2).max(1))                 # (B, h, w): mass now or at any target time
+    occ = mass > OCC_FRAC * mass.reshape(B, -1).max(1)[:, None, None]
     Y = Y.reshape(B, T * C, h, w)
     if s.y_scale == "std":
         Y = (Y - Y.mean()) / (Y.std() + 1e-8)
-    return X, Y
+    return X, Y, occ
 
 
-def score(frames: np.ndarray, times: list, s: Setting, runs: int = 3, device="cpu", seed: int = 0) -> tuple[float, float]:
-    """Mean and std of S over `runs` reservoir draws. Each run uses its own block of starts when there are
-    enough (rows per score ~ ROWS), otherwise all starts (data shared across runs)."""
+def _rows(res, xb, yb, ob, s: "Setting", rng):
+    """Feature and target rows as their RCEpiplexity2D.epiplexity builds them (one row per sample and site);
+    with s.rows == "occupied", only OCC_ROWS rows drawn from occupied sites (the reservoir still sees the whole
+    grid around each site)."""
     import torch
-    X, Y = xy(frames, times, s)
+    h = res.phi(xb)
+    F = h.movedim(1, -1).reshape(-1, res.channels)
+    T = yb.movedim(1, -1).reshape(-1, yb.shape[1])
+    if s.rows == "occupied":
+        idx = torch.nonzero(ob.reshape(-1)).squeeze(1)
+        if idx.numel() > OCC_ROWS:
+            idx = idx[torch.from_numpy(rng.choice(idx.numel(), OCC_ROWS, replace=False)).to(idx.device)]
+        F, T = F[idx], T[idx]
+    return F, T
+
+
+def score(frames: np.ndarray, times: list, s: Setting, runs: int = 3, device="cpu", seed: int = 0) -> dict:
+    """S (their estimator), the shuffled-target null and their difference, each as [mean, std] over `runs`
+    reservoir draws. Null (ours): the same rows with the target rows permuted, which breaks the X -> Y relation
+    and leaves only what the readout fits by chance at this target scale and row count. Each run uses its own
+    block of starts when there are enough (rows per score ~ ROWS), otherwise all starts (data shared)."""
+    import torch
+    X, Y, O = xy(frames, times, s)
     per = max(1, int(round(ROWS / (X.shape[-1] * X.shape[-2]))))
-    vals = []
+    out = {"S": [], "null": [], "net": [], "rows": []}
     for r in range(runs):
+        rng = np.random.default_rng(seed + 7 * r + 1)
         lo = (r * per) % X.shape[0] if X.shape[0] >= per * runs else 0
         xb = torch.from_numpy(np.ascontiguousarray(X[lo:lo + per])).to(device)
         yb = torch.from_numpy(np.ascontiguousarray(Y[lo:lo + per])).to(device)
+        ob = torch.from_numpy(np.ascontiguousarray(O[lo:lo + per])).to(device)
         res = reservoir_2d(s.depth, X.shape[1], seed + 1000 * r, device, ridge=s.ridge)
         with torch.no_grad():
-            vals.append(float(res.epiplexity(xb, yb).epiplexity))
-    return float(np.mean(vals)), float(np.std(vals))
+            F, T = _rows(res, xb, yb, ob, s, rng)
+            v = float(res.multioutput_epiplexity(F, T).epiplexity)
+            perm = torch.from_numpy(rng.permutation(T.shape[0])).to(T.device)
+            n = float(res.multioutput_epiplexity(F, T[perm]).epiplexity)
+        out["S"].append(v); out["null"].append(n); out["net"].append(v - n); out["rows"].append(int(F.shape[0]))
+    return {k: [round(float(np.mean(v)), 3), round(float(np.std(v)), 3)] for k, v in out.items()}
