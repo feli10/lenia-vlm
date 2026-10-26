@@ -43,12 +43,13 @@ class Setting:
     down: int = 1
     depth: int = 4
     y_scale: str = "raw"
-    rows: str = "all"            # "all" sites (as the paper) | "occupied": OCC_ROWS rows from sites with mass (ours)
+    rows: str = "all"            # "all" sites (as the paper) | "occupied": OCC_ROWS rows from sites with mass |
+                                 # "occ_full": up to ROWS occupied rows pooled over every start (ours)
     tau: int = TAU
     ridge: float = RIDGE
 
     def key(self) -> str:
-        return f"dt{self.dt}_down{self.down}_depth{self.depth}_{self.y_scale}" + ("_occ" if self.rows == "occupied" else "")
+        return f"dt{self.dt}_down{self.down}_depth{self.depth}_{self.y_scale}" + {"all": "", "occupied": "_occ", "occ_full": "_occfull"}[self.rows]
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -167,10 +168,11 @@ def _rows(res, xb, yb, ob, s: "Setting", rng):
     h = res.phi(xb)
     F = h.movedim(1, -1).reshape(-1, res.channels)
     T = yb.movedim(1, -1).reshape(-1, yb.shape[1])
-    if s.rows == "occupied":
+    if s.rows in ("occupied", "occ_full"):
+        n = OCC_ROWS if s.rows == "occupied" else ROWS
         idx = torch.nonzero(ob.reshape(-1)).squeeze(1)
-        if idx.numel() > OCC_ROWS:
-            idx = idx[torch.from_numpy(rng.choice(idx.numel(), OCC_ROWS, replace=False)).to(idx.device)]
+        if idx.numel() > n:
+            idx = idx[torch.from_numpy(rng.choice(idx.numel(), n, replace=False)).to(idx.device)]
         F, T = F[idx], T[idx]
     return F, T
 
@@ -179,10 +181,13 @@ def score(frames: np.ndarray, times: list, s: Setting, runs: int = 3, device="cp
     """S (their estimator), the shuffled-target null and their difference, each as [mean, std] over `runs`
     reservoir draws. Null (ours): the same rows with the target rows permuted, which breaks the X -> Y relation
     and leaves only what the readout fits by chance at this target scale and row count. Each run uses its own
-    block of starts when there are enough (rows per score ~ ROWS), otherwise all starts (data shared)."""
+    block of starts when there are enough (rows per score ~ ROWS), otherwise all starts (data shared); "occ_full"
+    always pools all starts."""
     import torch
     X, Y, O = xy(frames, times, s)
     per = max(1, int(round(ROWS / (X.shape[-1] * X.shape[-2]))))
+    if s.rows == "occ_full":                       # pool every start; each run draws its own ROWS occupied rows
+        per = X.shape[0]
     out = {"S": [], "null": [], "net": [], "rows": []}
     for r in range(runs):
         rng = np.random.default_rng(seed + 7 * r + 1)
