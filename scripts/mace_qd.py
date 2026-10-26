@@ -35,6 +35,14 @@ inherited, so elite and challenger are always the same age.
 - Variation: kernel mutation at --mut-scale plus beta x exp(N(0, 0.1)) in [0.5, 4], as in mace_evo.
 - Seeds: the 12 mace_evo founders plus --init more draws of the same sampler. Every elite records the seed
   it descends from ("root").
+- Parent selection (--parent-select): "uniform" (v1, v2) picks parents uniformly from the island's elites.
+  "surprise" (v3) scores every elite with Jev's surprise duel (surprise_check.py, validated against Felix's
+  ratings: "which world shows something more unusual and interesting ..."), each elite against
+  --surprise-opponents random other elites of the current archive (all islands), both orders; new elites are
+  scored when they enter and the whole archive is re-scored every --surprise-every iterations, so "unusual"
+  always means unusual relative to what the archive holds now. A share --surprise-mix of parents is still drawn
+  uniformly; the rest with probability proportional to exp(score / --surprise-temp). Surprise only decides where
+  to search; entry into a cell is still the complexity duel against the incumbent.
 Saves state after every iteration (resumes) and a snapshot of the maps every --snapshot-every iterations.
 """
 from __future__ import annotations
@@ -68,7 +76,9 @@ BODY_EDGES = [2, 3, 5, 9, 17, 33]                     # v1 bins: 1 | 2 | 3-4 | 5
 
 def settings(st: dict) -> argparse.Namespace:
     a = argparse.Namespace(**{"axes": ["bodies", "motion"], "body_edges": BODY_EDGES, "islands": 1,
-                              "migrate_every": 10, "form_bins": 4, "embed_model": "dinov2_vits14", **st["args"]})
+                              "migrate_every": 10, "form_bins": 4, "embed_model": "dinov2_vits14",
+                              "parent_select": "uniform", "surprise_opponents": 6, "surprise_every": 20,
+                              "surprise_mix": 0.5, "surprise_temp": 0.1, **st["args"]})
     if isinstance(a.axes, str):
         a.axes = a.axes.split(",")
     return a
@@ -257,6 +267,52 @@ def lineages(st: dict) -> int:
     return len({e.get("root") for arch in islands_of(st) for e in arch.values()})
 
 
+# ---------- surprise-weighted parent selection (v3) ----------
+
+def score_surprise(st: dict, which: list, judge, out: Path, rng, a, desc: str) -> int:
+    """Jev surprise score for the elites `which` ([(island, cell)]) against random other elites of the current
+    archive; stored as e["surprise"]. Returns the number of judge calls."""
+    from surprise_check import SURPRISE
+    allk = [(k, ck) for k, m in enumerate(islands_of(st)) for ck in m]
+    if len(allk) < 2 or not which:
+        return 0
+    cache = {}
+
+    def pic(k, ck):
+        name = islands_of(st)[k][ck]["image"]
+        if name not in cache:
+            cache[name] = np.asarray(Image.open(out / "img" / name).convert("RGB"))
+        return cache[name]
+
+    qs, meta = [], []
+    for k, ck in which:
+        others = [x for x in allk if x != (k, ck)]
+        for j in rng.choice(len(others), min(a.surprise_opponents, len(others)), replace=False):
+            o = others[int(j)]
+            qs += [Query(SURPRISE, pic(k, ck), pic(*o)), Query(SURPRISE, pic(*o), pic(k, ck))]
+            meta.append((k, ck))
+    vs = judge.judge_many(qs, desc=desc)
+    acc = {}
+    for d, key in enumerate(meta):
+        x, y = vs[2 * d], vs[2 * d + 1]
+        if x.ok and y.ok:
+            acc.setdefault(key, []).append(0.5 * (x.p_first + 1 - y.p_first))
+    it = st["it"]
+    for (k, ck), v in acc.items():
+        e = islands_of(st)[k][ck]
+        e["surprise"], e["surprise_it"] = round(float(np.mean(v)), 4), it
+    return len(qs)
+
+
+def pick_parent(arch: dict, keys: list, rng, a) -> str:
+    if a.parent_select != "surprise" or rng.random() < a.surprise_mix:
+        return keys[int(rng.integers(len(keys)))]
+    sc = np.array([arch[k].get("surprise", np.nan) for k in keys], float)
+    sc = np.where(np.isnan(sc), np.nanmedian(sc) if np.isfinite(sc).any() else 0.5, sc)
+    w = np.exp((sc - sc.max()) / a.surprise_temp)
+    return keys[int(rng.choice(len(keys), p=w / w.sum()))]
+
+
 def run(a) -> None:
     out = Path(a.out)
     (out / "img").mkdir(parents=True, exist_ok=True)
@@ -267,6 +323,8 @@ def run(a) -> None:
     if (out / "state.json").exists():
         st = json.loads((out / "state.json").read_text())
         keep = ("iterations", "backend", "judge", "out", "config", "sim_batch")
+        if "parent_select" not in st["args"]:                    # older runs: uniform parent selection
+            st["args"]["parent_select"] = "uniform"
         st["args"].update({k: getattr(a, k) for k in keep})
         a = settings(st)
         print(f"resuming at iteration {st['it']} ({sum(len(m) for m in islands_of(st))} cells filled)", file=sys.stderr)
@@ -298,7 +356,7 @@ def run(a) -> None:
                 keys = sorted(arch)
                 g = []
                 for _ in range(a.batch // K if keys else 0):
-                    pk = keys[int(rng.integers(len(keys)))]
+                    pk = pick_parent(arch, keys, rng, a)
                     par = Rule.from_dict(arch[pk]["rule"])
                     m = mutate(par, rng, a.mut_scale)
                     m.flow = "mace"
@@ -329,6 +387,15 @@ def run(a) -> None:
                       **({"form": e["form"]} if "form" in e else {})}
                 r = insert(st, k, [(Rule.from_dict(e["rule"]), f"migrant I{s}:{ck}", e.get("root"))], [ev], judge, out, it, log, a)
                 res["migrated"] += r["new"] + r["replaced"]
+        if a.parent_select == "surprise":
+            srng = np.random.default_rng([a.seed, it, 7])
+            if it % a.surprise_every == 0:
+                which = [(k, ck) for k, m in enumerate(islands_of(st)) for ck in m]
+            else:
+                which = [(k, ck) for k, m in enumerate(islands_of(st)) for ck, e in m.items() if "surprise" not in e]
+            res["surprise_calls"] += score_surprise(st, which, judge, out, srng, a, f"it {it} surprise")
+            sv = [e["surprise"] for m in islands_of(st) for e in m.values() if "surprise" in e]
+            res["surprise_mean_x1000"] = int(1000 * np.mean(sv)) if sv else 0
         fh.flush()
         filled = sum(len(m) for m in islands_of(st))
         st["progress"].append({"it": it, "filled": filled, "lineages": lineages(st), **dict(res), "sec": round(time.time() - t0, 1)})
@@ -340,6 +407,7 @@ def run(a) -> None:
         print(f"it {it}: {filled} cells filled, {lineages(st)} seed lineages, {res['new']} new, {res['replaced']} replaced, "
               f"{res['duels']} duels, {res['texture_fail']} grid-noise"
               + (f", {res['migrated']} migrants settled" if K > 1 and it % a.migrate_every == 0 and it else "")
+              + (f", archive surprise {res['surprise_mean_x1000'] / 1000:.2f}" if a.parent_select == "surprise" else "")
               + f", {time.time() - t0:.0f}s, judge spent ${judge.spent:.4f}", file=sys.stderr)
     fh.close()
     draw_map(out)
@@ -494,6 +562,11 @@ def main() -> None:
     r.add_argument("--threshold", type=float, default=0.6)
     r.add_argument("--mut-scale", type=float, default=3.0)
     r.add_argument("--snapshot-every", type=int, default=10)
+    r.add_argument("--parent-select", default="uniform", choices=["uniform", "surprise"])
+    r.add_argument("--surprise-opponents", type=int, default=6)
+    r.add_argument("--surprise-every", type=int, default=20, help="re-score the whole archive every N iterations")
+    r.add_argument("--surprise-mix", type=float, default=0.5, help="share of parents still drawn uniformly")
+    r.add_argument("--surprise-temp", type=float, default=0.1)
     r.add_argument("--seed", type=int, default=0)
     m = sub.add_parser("map")
     m.add_argument("--out", required=True)

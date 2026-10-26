@@ -18,12 +18,32 @@ plus every image of the goal-session run (elites and accepted branch children), 
 
 Felix's blind check: 30 pool worlds in random order, without scores: the 10 most surprising by the combined
 signal, the 5 most surprising by Jev alone and 5 by DINOv2 alone (not already chosen), and 10 at random. For each:
-"something new here?" (new / not new / unsure) and an optional note on what is new. `report` gives the share
+"something unusual here, compared with the typical MaCE world?" (unusual / typical / unsure; stored as
+new / not_new / unsure) and an optional note. The candidates come from runs Felix has seen, so the question is
+about rarity, not about whether he remembers the world. `report` gives the share
 judged new per selection; the detector is worth building on only if its picks clearly beat the random ones.
 
   python scripts/surprise_check.py score --runs RUNS --out RUNS/surprise    # Colab (Jev + DINOv2)
   uv run python scripts/surprise_check.py rate   --out runs/surprise                       # Mac, ~10 min
   uv run python scripts/surprise_check.py report --out runs/surprise
+  uv run python scripts/surprise_check.py duel   --out runs/surprise --runs runs   # v2: direct pairwise question (Mac)
+  uv run python scripts/surprise_check.py validate --out runs/surprise-val          # v3: held-out check of v2 (Mac)
+  uv run python scripts/surprise_check.py rate     --out runs/surprise-val
+  uv run python scripts/surprise_check.py val-report --out runs/surprise-val
+
+v2 (`duel`), after the library-misfit / DINOv2 signals failed (they flagged worlds far from home, not
+interesting ones): ask the judges directly, in the pairwise form that has worked best. Each of the 30 rated worlds
+meets the same 6 random reference worlds, both orders, under two prompts: "surprise" (which world shows something
+more unusual *and* interesting, a distinct feature or behaviour rather than more or less of the same?) and, as a
+baseline, the generic complexity prompt of mace_evo. A world's score is its mean win probability. Measured
+against Felix's ratings as AUC (unusual vs typical; 0.5 = chance) with a one-sided permutation p-value.
+
+v3 (`validate`): the v2 prompt was written after v1 failed, on the same 30 worlds, so it is checked on fresh ones.
+Pool: worlds from --pool-dirs (default: every elite picture of mace-qd2 and every lineage picture of the
+mace-evo-jev-v3 hill climber), minus the 138 reference worlds and the 30 rated ones (by content), de-duplicated,
+then --n-pool sampled at random, equally from each folder. Each pool world meets 6 random reference worlds
+(both orders) under the v2 surprise prompt with Jev. Felix rates, blind and shuffled, the 10 top-scoring worlds
+and 10 random others with the same question. Pass: the top 10 are judged unusual clearly more often.
 """
 from __future__ import annotations
 
@@ -42,7 +62,8 @@ from PIL import Image
 
 import goal_groups as GG
 from lenia.config import REPO_ROOT, load
-from lenia.judge import ChoiceQuery, Judge, load_env
+from lenia.judge import ChoiceQuery, Judge, Query, load_env
+from lenia.prompts import PROMPTS
 
 GROUPS = ["interior", "shape", "edge", "surroundings", "bodies", "change"]
 NONE = GG.NONE
@@ -174,10 +195,11 @@ PAGE = """<!doctype html><meta charset=utf-8><title>something new?</title>
 <style>body{font:15px system-ui;background:#111;color:#eee;margin:16px}img{width:620px;border:1px solid #333}
 button{padding:8px 22px;font:15px system-ui;margin:8px 8px 0 0}#n{color:#999}input{width:600px;padding:6px;
 font:14px system-ui;background:#222;color:#eee;border:1px solid #444}</style>
-<div id=n></div><p>Does this world show <b>something new</b>: a feature or behaviour you have not seen in our MaCE worlds
-before? (four snapshots, reading order)</p><img id=im><br>
-<input id=note placeholder="optional: what is new?"><br>
-<button data-a=new>new</button><button data-a=not_new>not new</button><button data-a=unsure>unsure</button>
+<div id=n></div><p>Does this world show <b>something unusual</b>: a feature or behaviour that stands out from the typical
+MaCE worlds we get (not just bigger, smaller, more of the same, or another colour)? Whether you have seen this
+particular world before does not matter. (four snapshots, reading order)</p><img id=im><br>
+<input id=note placeholder="optional: what stands out?"><br>
+<button data-a=new>unusual</button><button data-a=not_new>typical</button><button data-a=unsure>unsure</button>
 <script>
 let todo=[];async function load(){todo=await (await fetch('/todo')).json();show()}
 function show(){if(!todo.length){document.body.innerHTML='<h2>Done, thank you. Close this tab and press Ctrl-C.</h2>';return}
@@ -254,7 +276,7 @@ def report(a) -> None:
     ans = _answers(out)
     L = ["# Surprise detector check\n",
          f"{len(S['reference'])} reference worlds (the ones the goal library was written from), {len(S['pool'])} candidates "
-         "(goal-matching test worlds + goal-session images). Felix rated 30 candidates blind: \"something new here?\"\n",
+         "(goal-matching test worlds + goal-session images). Felix rated 30 candidates blind: \"something unusual here?\" (new = unusual)\n",
          "| selection | rated | new | not new | unsure | share new (of new + not new) |", "|---|---|---|---|---|---|"]
     for sel in ("top_combined", "top_jev", "top_dino", "random"):
         r = [ans[t["id"]]["answer"] for t in tasks if t["selection"] == sel and t["id"] in ans]
@@ -275,19 +297,223 @@ def report(a) -> None:
     print("\n".join(L))
 
 
+# ---------- v2: direct pairwise surprise duels ----------
+
+SURPRISE = "surprise_unusual_interesting"
+PROMPTS.setdefault(SURPRISE, {
+    "instructions": ("You are shown two worlds from a mass-conserving variant of Lenia, a continuous cellular automaton "
+                     "used in artificial-life research. Each image shows one whole world as four snapshots taken some time "
+                     "apart, in reading order (top-left, top-right, bottom-left, bottom-right); the colours are three "
+                     "interacting chemical channels. The two images are {A} and {B}. Which world shows something more "
+                     "unusual and interesting: a distinct feature or behaviour that stands out, rather than just more or "
+                     "less of the same, a different size, or a different colour?"),
+    "first": "The world in {A} shows something more unusual and interesting.",
+    "second": "The world in {B} shows something more unusual and interesting."})
+N_OPP = 6
+
+
+def auc(scores: list, labels: list, n_perm: int = 20000, seed: int = 0) -> tuple[float, float]:
+    """AUC of scores for label 1 vs 0 (ties count half) and a one-sided permutation p-value."""
+    s, y = np.asarray(scores, float), np.asarray(labels, int)
+    def a_(yy):
+        pos, neg = s[yy == 1], s[yy == 0]
+        return float(((pos[:, None] > neg[None]) + 0.5 * (pos[:, None] == neg[None])).mean())
+    obs = a_(y)
+    rng = np.random.default_rng(seed)
+    perm = np.array([a_(rng.permutation(y)) for _ in range(n_perm)])
+    return obs, float((perm >= obs - 1e-12).mean())
+
+
+def duel(a) -> None:
+    out = Path(a.out)
+    tasks = json.loads((out / "tasks.json").read_text())
+    S = json.loads((out / "surprise.json").read_text())
+    ans = _answers(out)
+    ref_dir = Path(a.runs) / "mace-qd2" / "check" / "images"
+    refs = [ref_dir / n for n in S["reference"]]
+    missing = [r for r in refs if not r.exists()]
+    if missing:
+        sys.exit(f"{len(missing)} reference images missing under {ref_dir}")
+    rng = np.random.default_rng(a.seed + 5)
+    opp = {t["id"]: [refs[i] for i in rng.choice(len(refs), N_OPP, replace=False)] for t in tasks}
+    img = lambda p: np.asarray(Image.open(p).convert("RGB"))
+    cand = {t["id"]: img(out / "images" / t["image"]) for t in tasks}
+    cache = {}
+    cfg = load(a.config)
+    load_env(REPO_ROOT / ".env")
+    from mace_evo import PROMPT_ID as COMPLEXITY
+    res = {}
+    for jn in a.judges.split(","):
+        judge = Judge(jn, {**cfg["judges"]["defaults"], **cfg["judges"][jn]}, out / "duel_cache.sqlite", yes=True)
+        for pname, pid in (("surprise", SURPRISE), ("complexity", COMPLEXITY)):
+            qs, meta = [], []
+            for t in tasks:
+                for r in opp[t["id"]]:
+                    if r not in cache:
+                        cache[r] = img(r)
+                    qs += [Query(pid, cand[t["id"]], cache[r]), Query(pid, cache[r], cand[t["id"]])]
+                    meta.append(t["id"])
+            vs = judge.judge_many(qs, desc=f"{jn} {pname}")
+            sc = {}
+            for n, tid in enumerate(meta):
+                x, y = vs[2 * n], vs[2 * n + 1]
+                if x.ok and y.ok:
+                    sc.setdefault(tid, []).append(0.5 * (x.p_first + 1 - y.p_first))
+            res[f"{jn}/{pname}"] = {str(k): float(np.mean(v)) for k, v in sc.items()}
+        print(f"{jn}: spent ${judge.spent:.4f}", file=sys.stderr)
+    (out / "duel.json").write_text(json.dumps({"opponents": {str(k): [p.name for p in v] for k, v in opp.items()},
+                                               "scores": res}, indent=1))
+    by = {r["name"]: r for r in S["pool"]}
+    dec = [t for t in tasks if t["id"] in ans and ans[t["id"]]["answer"] in ("new", "not_new")]
+    y = [int(ans[t["id"]]["answer"] == "new") for t in dec]
+    L = ["# Surprise detector v2: direct pairwise duels\n",
+         f"{len(dec)} decisive ratings by Felix ({sum(y)} unusual, {len(y) - sum(y)} typical). Each world met the same "
+         f"{N_OPP} random reference worlds, both orders. AUC = probability an unusual world scores above a typical one "
+         "(0.5 chance); p = one-sided permutation test.\n",
+         "| signal | AUC | p | mean score, unusual | mean score, typical |", "|---|---|---|---|---|"]
+    rows = [(k, {t["id"]: v[str(t["id"])] for t in dec if str(t["id"]) in v}) for k, v in res.items()]
+    rows += [(f"v1 {k}", {t["id"]: by[t["name"]][k] for t in dec}) for k in ("combined", "jev_z", "dino_z")]
+    for k, v in rows:
+        ids = [t["id"] for t in dec if t["id"] in v]
+        yy = [y[i] for i, t in enumerate(dec) if t["id"] in v]
+        sc = [v[i] for i in ids]
+        A, p = auc(sc, yy)
+        mu = np.mean([s_ for s_, l in zip(sc, yy) if l]), np.mean([s_ for s_, l in zip(sc, yy) if not l])
+        L.append(f"| {k} | {A:.2f} | {p:.3f} | {mu[0]:.2f} | {mu[1]:.2f} |")
+    L += ["", "Per world (Felix's answer; surprise score per judge):", ""]
+    for t in tasks:
+        a_ = ans.get(t["id"], {}).get("answer", "-")
+        L.append(f"- {t['image']} ({t['selection']}, {a_}): " + ", ".join(
+            f"{k} {v.get(str(t['id']), float('nan')):.2f}" for k, v in res.items()))
+    (out / "duel.md").write_text("\n".join(L) + "\n")
+    print("\n".join(L))
+
+
+# ---------- v3: held-out validation of the v2 surprise duel ----------
+
+def validate(a) -> None:
+    out = Path(a.out)
+    (out / "images").mkdir(parents=True, exist_ok=True)
+    src = Path(a.out_v1)
+    S = json.loads((src / "surprise.json").read_text())
+    ref_dir = Path(a.runs) / "mace-qd2" / "check" / "images"
+    refs = [ref_dir / n for n in S["reference"]]
+    excl = {_hash(p) for p in refs} | {_hash(p) for p in sorted((src / "images").glob("*.png"))}
+    rng = np.random.default_rng(a.seed + 11)
+    dirs = [Path(d) for d in a.pool_dirs.split(",") if Path(d).is_dir()]
+    if not dirs:
+        sys.exit(f"none of {a.pool_dirs} exists")
+    per_dir = {}
+    for d in dirs:
+        seen, keep = set(), []
+        for p in sorted(d.glob("*.png")):
+            h = _hash(p)
+            if h not in excl and h not in seen:
+                seen.add(h)
+                keep.append(p)
+        excl |= seen
+        per_dir[d] = keep
+        print(f"{d}: {len(keep)} fresh worlds", file=sys.stderr)
+    n_each = a.n_pool // len(dirs)
+    pool = []
+    for d, keep in per_dir.items():
+        pool += [keep[i] for i in sorted(rng.choice(len(keep), min(n_each, len(keep)), replace=False))]
+    opp = [[refs[i] for i in rng.choice(len(refs), N_OPP, replace=False)] for _ in pool]
+    img = lambda p: np.asarray(Image.open(p).convert("RGB"))
+    cache = {}
+    cfg = load(a.config)
+    load_env(REPO_ROOT / ".env")
+    judge = Judge(a.judge, {**cfg["judges"]["defaults"], **cfg["judges"][a.judge]}, out / "judge_cache.sqlite", yes=True)
+    qs, meta = [], []
+    for i, p in enumerate(pool):
+        c = img(p)
+        for r in opp[i]:
+            if r not in cache:
+                cache[r] = img(r)
+            qs += [Query(SURPRISE, c, cache[r]), Query(SURPRISE, cache[r], c)]
+            meta.append(i)
+    vs = judge.judge_many(qs, desc="surprise")
+    print(f"{a.judge}: spent ${judge.spent:.4f}", file=sys.stderr)
+    sc = {}
+    for n, i in enumerate(meta):
+        x, y = vs[2 * n], vs[2 * n + 1]
+        if x.ok and y.ok:
+            sc.setdefault(i, []).append(0.5 * (x.p_first + 1 - y.p_first))
+    score_ = {i: float(np.mean(v)) for i, v in sc.items()}
+    ranked = sorted(score_, key=lambda i: -score_[i])
+    top = ranked[:N_TOP]
+    rest = [i for i in score_ if i not in top]
+    rnd = [int(i) for i in np.random.default_rng(a.seed + 12).choice(rest, min(N_RANDOM, len(rest)), replace=False)]
+    chosen = [(i, "top_jev_surprise") for i in top] + [(i, "random") for i in rnd]
+    chosen = [chosen[j] for j in np.random.default_rng(a.seed + 13).permutation(len(chosen))]
+    tasks = []
+    for k, (i, sel) in enumerate(chosen):
+        shutil.copy(pool[i], out / "images" / f"w{k:02d}.png")
+        tasks.append({"id": k, "image": f"w{k:02d}.png", "name": str(pool[i]), "selection": sel, "score": round(score_[i], 4)})
+    (out / "tasks.json").write_text(json.dumps(tasks, indent=1))
+    (out / "scores.json").write_text(json.dumps({"pool": [str(p) for p in pool], "score": {str(pool[i]): v for i, v in score_.items()},
+                                                 "opponents": {str(pool[i]): [r.name for r in opp[i]] for i in range(len(pool))}}, indent=1))
+    print(f"{len(score_)} worlds scored; top-10 scores {[round(score_[i], 2) for i in top]}; "
+          f"pool median {np.median(list(score_.values())):.2f}. Rate with: surprise_check.py rate --out {out}")
+
+
+def fisher_greater(a1: int, b1: int, a2: int, b2: int) -> float:
+    """One-sided Fisher exact test: P(top row has >= a1 successes) given the margins (no scipy needed)."""
+    from math import comb
+    n1, n2, k = a1 + b1, a2 + b2, a1 + a2
+    tot = comb(n1 + n2, k)
+    return sum(comb(n1, x) * comb(n2, k - x) for x in range(a1, min(n1, k) + 1) if 0 <= k - x <= n2) / tot
+
+
+def val_report(a) -> None:
+    out = Path(a.out)
+    tasks = json.loads((out / "tasks.json").read_text())
+    ans = _answers(out)
+    L = ["# Surprise detector v3: held-out validation of the Jev surprise duel\n",
+         "Fresh worlds (not the 30 rated in v1/v2, not the 138 reference worlds). Felix rated, blind and shuffled, the 10 "
+         "top-scoring worlds and 10 random others: \"something unusual here, compared with the typical MaCE world?\"\n",
+         "| selection | rated | unusual | typical | unsure | share unusual (of decisive) |", "|---|---|---|---|---|---|"]
+    cnt = {}
+    for sel in ("top_jev_surprise", "random"):
+        r = [ans[t["id"]]["answer"] for t in tasks if t["selection"] == sel and t["id"] in ans]
+        n, nn, u = r.count("new"), r.count("not_new"), r.count("unsure")
+        cnt[sel] = (n, nn)
+        L.append(f"| {sel} | {len(r)} | {n} | {nn} | {u} | " + (f"{n / (n + nn):.2f} |" if n + nn else "- |"))
+    if all(sum(v) for v in cnt.values()):
+        p = fisher_greater(*cnt["top_jev_surprise"], *cnt["random"])
+        L.append(f"\nOne-sided Fisher exact test, top vs random: p = {p:.3f}.")
+    dec = [t for t in tasks if t["id"] in ans and ans[t["id"]]["answer"] in ("new", "not_new")]
+    if len({ans[t["id"]]["answer"] for t in dec}) == 2:
+        A, p = auc([t["score"] for t in dec], [int(ans[t["id"]]["answer"] == "new") for t in dec])
+        L.append(f"AUC of the Jev surprise score over the {len(dec)} decisive ratings: {A:.2f} (permutation p = {p:.3f}).")
+    L += ["", "Per world:", ""] + [f"- {t['image']} ({t['selection']}, score {t['score']:.2f}): "
+                                    f"{ans.get(t['id'], {}).get('answer', '-')} {ans.get(t['id'], {}).get('note', '')} [{Path(t['name']).parent.parent.name}/{Path(t['name']).name}]"
+                                    for t in tasks]
+    (out / "val_report.md").write_text("\n".join(L) + "\n")
+    print("\n".join(L))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["score", "rate", "report"])
+    ap.add_argument("cmd", choices=["score", "rate", "report", "duel", "validate", "val-report"])
     ap.add_argument("--runs", default="runs")
-    ap.add_argument("--out", default="runs/surprise")
+    ap.add_argument("--out", default=None, help="default: runs/surprise-val for validate / val-report, else runs/surprise")
     ap.add_argument("--library", default="data/goal_library_v3.json")
     ap.add_argument("--judge", default="jev")
+    ap.add_argument("--judges", default="jev,luna", help="duel: judges to ask")
+    ap.add_argument("--out-v1", default="runs/surprise", help="validate: the v1/v2 folder (reference list, rated worlds)")
+    ap.add_argument("--pool-dirs", default="runs/mace-qd2/img,runs/mace-evo-jev-v3/img")
+    ap.add_argument("--n-pool", type=int, default=300)
     ap.add_argument("--config", default=None)
     ap.add_argument("--embed-model", default="dinov2_vits14")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--port", type=int, default=8769)
     a = ap.parse_args()
-    {"score": score, "rate": rate, "report": report}[a.cmd](a)
+    if a.out is None:
+        a.out = "runs/surprise-val" if a.cmd in ("validate", "val-report") else "runs/surprise"
+    if a.cmd == "validate" and Path(a.out).resolve() == Path(a.out_v1).resolve():
+        sys.exit("--out must differ from --out-v1 (validate would overwrite the v1 tasks and images)")
+    {"score": score, "rate": rate, "report": report, "duel": duel, "validate": validate, "val-report": val_report}[a.cmd](a)
 
 
 if __name__ == "__main__":
