@@ -45,6 +45,17 @@ inherited, so elite and challenger are always the same age.
   to search; entry into a cell is still the complexity duel against the incumbent. --surprise-ref other-lineages
   draws the opponents only from other seed lineages, so a lineage that spreads over many cells is not made
   "typical" by its own relatives and keeps being refined.
+- Surprise archive (--sarch, v4): surprise decides what is *kept*, not only what is mutated. After the map
+  insertions of an iteration, --sarch-candidates random challengers per island that did not get into the map
+  (lost the complexity duel or the competition for their cell; grid noise excluded) are judged with the surprise
+  duel against --surprise-opponents random members of the map and the surprise archive (all islands), both
+  orders. Those scoring >= the current threshold join the surprise archive (kept even though the map rejected
+  them; at most --sarch-max, oldest dropped first). A share --sarch-parents of each island's parents is drawn
+  uniformly from that island's archive members, so surprising worlds become stepping stones whose children
+  compete for the map like any other. This is novelty search's archive (Lehman & Stanley 2011) with the
+  validated surprise duel as the novelty measure, including their adaptive threshold: +0.02 when more than
+  2 enter in one iteration, -0.02 after 5 iterations with none, within [0.5, 0.9], from --sarch-threshold.
+  Parent selection inside the map stays uniform unless --parent-select surprise is also given.
 Saves state after every iteration (resumes) and a snapshot of the maps every --snapshot-every iterations.
 """
 from __future__ import annotations
@@ -80,7 +91,9 @@ def settings(st: dict) -> argparse.Namespace:
     a = argparse.Namespace(**{"axes": ["bodies", "motion"], "body_edges": BODY_EDGES, "islands": 1,
                               "migrate_every": 10, "form_bins": 4, "embed_model": "dinov2_vits14",
                               "parent_select": "uniform", "surprise_opponents": 6, "surprise_every": 20,
-                              "surprise_mix": 0.5, "surprise_temp": 0.1, "surprise_ref": "all", **st["args"]})
+                              "surprise_mix": 0.5, "surprise_temp": 0.1, "surprise_ref": "all", "sarch": False,
+                              "sarch_candidates": 3, "sarch_parents": 0.25, "sarch_threshold": 0.6, "sarch_max": 200,
+                              **st["args"]})
     if isinstance(a.axes, str):
         a.axes = a.axes.split(",")
     return a
@@ -251,6 +264,7 @@ def insert(st: dict, k: int, cands: list, evals: list, judge, out: Path, it: int
                     **({"form": round(e["form"], 4)} if "form" in e else {})}
 
     new_cells = replaced = 0
+    placed = {n for ck, n in first_new.items() if ck not in best} | {n for _, n in best.values()}
     for ck, n in first_new.items():
         if ck not in best:
             place(ck, n, None)
@@ -262,7 +276,8 @@ def insert(st: dict, k: int, cands: list, evals: list, judge, out: Path, it: int
         else:
             new_cells += 1
         place(ck, n, p)
-    return {"texture_fail": n_tex, "new": new_cells, "replaced": replaced, "duels": len(duels)}
+    outside = [n for ns in by_cell.values() for n in ns if n not in placed]
+    return {"texture_fail": n_tex, "new": new_cells, "replaced": replaced, "duels": len(duels), "outside": outside}
 
 
 def lineages(st: dict) -> int:
@@ -319,6 +334,65 @@ def pick_parent(arch: dict, keys: list, rng, a) -> str:
     return keys[int(rng.choice(len(keys), p=w / w.sum()))]
 
 
+# ---------- surprise archive (v4) ----------
+
+def sarch_step(st: dict, outside: list, judge, out: Path, rng, a, it: int, slog) -> dict:
+    """outside: [(island, cand, eval)] challengers the map rejected this iteration. Judges up to
+    --sarch-candidates per island with the surprise duel against random members of map + surprise archive and
+    adds those at or above the threshold. Returns counts."""
+    from surprise_check import SURPRISE
+    sar = st.setdefault("sarch", [])
+    pick = []
+    for k in range(a.islands):
+        mine = [x for x in outside if x[0] == k]
+        pick += [mine[int(j)] for j in rng.choice(len(mine), min(a.sarch_candidates, len(mine)), replace=False)]
+    ref = [islands_of(st)[k][ck]["image"] for k, m in enumerate(islands_of(st)) for ck in m] + [e["image"] for e in sar]
+    if not pick or len(ref) < 2:
+        return {}
+    cache = {}
+
+    def pic(name):
+        if name not in cache:
+            cache[name] = np.asarray(Image.open(out / "img" / name).convert("RGB"))
+        return cache[name]
+
+    qs = []
+    for k, c, ev in pick:
+        for j in rng.choice(len(ref), min(a.surprise_opponents, len(ref)), replace=False):
+            o = pic(ref[int(j)])
+            qs += [Query(SURPRISE, ev["pic"], o), Query(SURPRISE, o, ev["pic"])]
+    vs = judge.judge_many(qs, desc=f"it {it} surprise archive")
+    per = len(qs) // len(pick)
+    thr = st.get("sarch_thr", a.sarch_threshold)
+    added = 0
+    tag = lambda k: f"I{k}_" if a.islands > 1 else ""
+    for i, (k, (rule, parent, root, n), ev) in enumerate(pick):
+        v = [0.5 * (x.p_first + 1 - y.p_first) for x, y in zip(vs[i * per:(i + 1) * per:2], vs[i * per + 1:(i + 1) * per:2])
+             if x.ok and y.ok]
+        sc = float(np.mean(v)) if v else None
+        ok = sc is not None and sc >= thr
+        slog.writerow([it, k, n, parent or "", "" if sc is None else round(sc, 4), round(thr, 3), int(ok), ev["bodies"],
+                       round(ev["motion"], 4), root])
+        if ok:
+            name = f"it{it:04d}_{tag(k)}{n:03d}.png"
+            if not (out / "img" / name).exists():
+                Image.fromarray(ev["pic"]).save(out / "img" / name)
+            sar.append({"rule": rule.to_dict(), "image": name, "it": it, "parent": parent, "root": root, "island": k,
+                        "surprise": round(sc, 4), "bodies": ev["bodies"], "motion": round(ev["motion"], 4),
+                        "texture": round(ev["texture"], 4), "coverage": round(ev["coverage"], 4),
+                        **({"form": round(ev["form"], 4)} if "form" in ev else {})})
+            added += 1
+    if len(sar) > a.sarch_max:
+        del sar[:len(sar) - a.sarch_max]
+    dry = 0 if added else st.get("sarch_dry", 0) + 1                  # novelty search's adaptive threshold
+    if added > 2:
+        thr = min(0.9, thr + 0.02)
+    elif dry >= 5:
+        thr, dry = max(0.5, thr - 0.02), 0
+    st["sarch_thr"], st["sarch_dry"] = round(thr, 4), dry
+    return {"sarch_judged": len(pick), "sarch_added": added, "sarch_calls": len(qs)}
+
+
 def run(a) -> None:
     out = Path(a.out)
     (out / "img").mkdir(parents=True, exist_ok=True)
@@ -331,6 +405,7 @@ def run(a) -> None:
         keep = ("iterations", "backend", "judge", "out", "config", "sim_batch")
         if "parent_select" not in st["args"]:                    # older runs: uniform parent selection
             st["args"]["parent_select"] = "uniform"
+        st["args"].setdefault("sarch", False)
         st["args"].update({k: getattr(a, k) for k in keep})
         a = settings(st)
         print(f"resuming at iteration {st['it']} ({sum(len(m) for m in islands_of(st))} cells filled)", file=sys.stderr)
@@ -346,6 +421,11 @@ def run(a) -> None:
     if fh.tell() == 0:
         log.writerow(["it", "island", "cand", "parent", "cell", "kind", "p", "accepted", "bodies", "motion", "form",
                       "texture", "beta", "root"])
+    if a.sarch:
+        sfh = open(out / "sarch.csv", "a", newline="")
+        slog = csv.writer(sfh)
+        if sfh.tell() == 0:
+            slog.writerow(["it", "island", "cand", "parent", "surprise", "threshold", "added", "bodies", "motion", "root"])
     while st["it"] <= a.iterations:
         it = st["it"]
         t0 = time.time()
@@ -361,7 +441,17 @@ def run(a) -> None:
             for k, arch in enumerate(islands_of(st)):
                 keys = sorted(arch)
                 g = []
+                sk = [j for j, e in enumerate(st.get("sarch", [])) if e["island"] == k] if a.sarch else []
                 for _ in range(a.batch // K if keys else 0):
+                    if sk and rng.random() < a.sarch_parents:          # a stepping stone from the surprise archive
+                        j = sk[int(rng.integers(len(sk)))]
+                        se = st["sarch"][j]
+                        par = Rule.from_dict(se["rule"])
+                        m = mutate(par, rng, a.mut_scale)
+                        m.flow = "mace"
+                        m.beta = float(np.clip(par.beta * np.exp(rng.normal(0, 0.1)), 0.5, 4.0))
+                        g.append((m, f"I{k}:S:{se['image']}", se.get("root")))
+                        continue
                     pk = pick_parent(arch, keys, rng, a)
                     par = Rule.from_dict(arch[pk]["rule"])
                     m = mutate(par, rng, a.mut_scale)
@@ -376,8 +466,11 @@ def run(a) -> None:
         add_form(evals, st)
         res = Counter()
         pos = 0
+        outside = []
         for k, g in enumerate(groups):
-            res.update(insert(st, k, g, evals[pos:pos + len(g)], judge, out, it, log, a))
+            r = insert(st, k, g, evals[pos:pos + len(g)], judge, out, it, log, a)
+            outside += [(k, (*g[n], n), evals[pos + n]) for n in r.pop("outside")]
+            res.update(r)
             pos += len(g)
         if K > 1 and it > 0 and it % a.migrate_every == 0:              # ring migration: island k gets one of k+1's
             maps = islands_of(st)
@@ -393,6 +486,9 @@ def run(a) -> None:
                       **({"form": e["form"]} if "form" in e else {})}
                 r = insert(st, k, [(Rule.from_dict(e["rule"]), f"migrant I{s}:{ck}", e.get("root"))], [ev], judge, out, it, log, a)
                 res["migrated"] += r["new"] + r["replaced"]
+        if a.sarch and it > 0:
+            res.update(sarch_step(st, outside, judge, out, np.random.default_rng([a.seed, it, 11]), a, it, slog))
+            sfh.flush()
         if a.parent_select == "surprise":
             srng = np.random.default_rng([a.seed, it, 7])
             if it % a.surprise_every == 0:
@@ -414,9 +510,14 @@ def run(a) -> None:
               f"{res['duels']} duels, {res['texture_fail']} grid-noise"
               + (f", {res['migrated']} migrants settled" if K > 1 and it % a.migrate_every == 0 and it else "")
               + (f", archive surprise {res['surprise_mean_x1000'] / 1000:.2f}" if a.parent_select == "surprise" else "")
+              + (f", surprise archive +{res['sarch_added']}/{res['sarch_judged']} -> {len(st.get('sarch', []))} "
+                 f"(threshold {st.get('sarch_thr', a.sarch_threshold):.2f})" if a.sarch and it else "")
               + f", {time.time() - t0:.0f}s, judge spent ${judge.spent:.4f}", file=sys.stderr)
     fh.close()
     draw_map(out)
+    if a.sarch:
+        sfh.close()
+        draw_sarch(out)
 
 
 # ---------- outputs ----------
@@ -465,6 +566,24 @@ def draw_map(out: Path, path: Path | None = None, maps: list | None = None, titl
     return path
 
 
+def draw_sarch(out: Path, cols: int = 10, px: int = 160) -> Path | None:
+    """sarch.png: every surprise-archive member (2x2 picture), oldest first, labelled iteration / island / score."""
+    st = json.loads((out / "state.json").read_text())
+    sar = st.get("sarch", [])
+    if not sar:
+        return None
+    rows = (len(sar) + cols - 1) // cols
+    sheet = Image.new("RGB", (cols * px, rows * (px + 14)), "white")
+    d = ImageDraw.Draw(sheet)
+    for i, e in enumerate(sar):
+        x, y = (i % cols) * px, (i // cols) * (px + 14)
+        sheet.paste(Image.open(out / "img" / e["image"]).convert("RGB").resize((px, px)), (x, y + 14))
+        d.text((x + 3, y + 1), f"it{e['it']} I{e['island']} s{e['surprise']:.2f}", fill="black")
+    path = out / "sarch.png"
+    sheet.save(path)
+    return path
+
+
 def show_map(a) -> None:
     out = Path(a.out)
     p = draw_map(out)
@@ -476,6 +595,9 @@ def show_map(a) -> None:
               f"last 10 iterations: {sum(x.get('new', 0) for x in tail)} new, {sum(x.get('replaced', 0) for x in tail)} "
               f"replaced, {sum(x.get('duels', 0) for x in tail)} duels, {np.mean([x['sec'] for x in tail]):.0f}s per iteration")
     print(p)
+    if st.get("sarch"):
+        print(f"surprise archive: {len(st['sarch'])} members, threshold {st.get('sarch_thr'):.2f}")
+        print(draw_sarch(out))
 
 
 def check(a) -> None:
@@ -575,6 +697,11 @@ def main() -> None:
     r.add_argument("--surprise-temp", type=float, default=0.1)
     r.add_argument("--surprise-ref", default="all", choices=["all", "other-lineages"],
                    help="opponents for the surprise duel: any elite (v3), or only elites of other seed lineages")
+    r.add_argument("--sarch", action="store_true", help="keep surprising map rejects in a surprise archive (v4)")
+    r.add_argument("--sarch-candidates", type=int, default=3, help="rejected challengers judged per island per iteration")
+    r.add_argument("--sarch-parents", type=float, default=0.25, help="share of each island's parents drawn from its archive members")
+    r.add_argument("--sarch-threshold", type=float, default=0.6, help="initial surprise score needed to join (adapts)")
+    r.add_argument("--sarch-max", type=int, default=200)
     r.add_argument("--seed", type=int, default=0)
     m = sub.add_parser("map")
     m.add_argument("--out", required=True)

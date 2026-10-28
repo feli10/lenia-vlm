@@ -14,6 +14,13 @@ independent, so the p-values are optimistic.
 Felix's blind check: 12 random elites from each archive (not chosen by any judge), shuffled; same question as the
 surprise check ("something unusual here, compared with the typical MaCE world?"), rated with surprise_check.py.
 
+Runs with a surprise archive (mace_qd.py --sarch): its members join the pool as a third group, "<run> (archive)",
+and get their own row, so the map (did keeping surprising worlds as stepping stones change what the map ends up
+holding?) and the archive (does it hold unusual worlds? partly by construction: Jev chose them) are reported
+separately. Felix's sample then adds 12 random archive members.
+
+  uv run python scripts/qd_compare.py score --a runs/mace-qd2 --b runs/mace-qd5-sarch-s0 --out runs/qd5-compare-s0
+
   uv run python scripts/qd_compare.py score                            # ~12,500 judge calls, about $1-2 (Mac)
   uv run python scripts/surprise_check.py rate --out runs/qd-compare   # your 24 ratings
   uv run python scripts/qd_compare.py report
@@ -38,9 +45,16 @@ from surprise_check import SURPRISE, _answers, auc, fisher_greater
 N_RATE, TOP = 12, 20
 
 
-def elites(run: Path) -> list:
+def elites(run: Path, sarch: bool = False) -> list:
+    """The final map's elites, or (sarch=True) the surprise archive's members, labelled "<run> (archive)"."""
     st = json.loads((run / "state.json").read_text())
     out = []
+    if sarch:
+        for e in st.get("sarch", []):
+            out.append({"run": f"{run.name} (archive)", "island": e["island"], "cell": None,
+                        "image": str(run / "img" / e["image"]), "root": e.get("root"), "motion": e.get("motion"),
+                        "bodies": e.get("bodies")})
+        return out
     for k, m in enumerate(QD.islands_of(st)):
         for ck, e in sorted(m.items()):
             out.append({"run": run.name, "island": k, "cell": ck, "image": str(run / "img" / e["image"]),
@@ -51,12 +65,13 @@ def elites(run: Path) -> list:
 def score(a) -> None:
     out = Path(a.out)
     (out / "images").mkdir(parents=True, exist_ok=True)
-    A, B = elites(Path(a.a)), elites(Path(a.b))
-    pool = A + B
+    A, B, S = elites(Path(a.a)), elites(Path(a.b)), elites(Path(a.b), sarch=True)
+    pool = A + B + S
     missing = [e["image"] for e in pool if not Path(e["image"]).exists()]
     if missing:
         sys.exit(f"{len(missing)} images missing, e.g. {missing[0]} (rsync the runs' img folders)")
-    print(f"{Path(a.a).name}: {len(A)} elites; {Path(a.b).name}: {len(B)} elites", file=sys.stderr)
+    print(f"{Path(a.a).name}: {len(A)} elites; {Path(a.b).name}: {len(B)} elites" +
+          (f" + {len(S)} surprise-archive members" if S else ""), file=sys.stderr)
     rng = np.random.default_rng(a.seed)
     opp = [[int(j) for j in rng.choice([x for x in range(len(pool)) if x != i], a.opponents, replace=False)]
            for i in range(len(pool))]
@@ -88,7 +103,8 @@ def score(a) -> None:
     # Felix's blind sample: random elites from each archive
     rr = np.random.default_rng(a.seed + 1)
     pick = [(i, "A") for i in rr.choice(len(A), min(N_RATE, len(A)), replace=False)] + \
-           [(len(A) + i, "B") for i in rr.choice(len(B), min(N_RATE, len(B)), replace=False)]
+           [(len(A) + i, "B") for i in rr.choice(len(B), min(N_RATE, len(B)), replace=False)] + \
+           [(len(A) + len(B) + i, "S") for i in (rr.choice(len(S), min(N_RATE, len(S)), replace=False) if S else [])]
     pick = [pick[j] for j in rr.permutation(len(pick))]
     tasks = []
     for k, (i, side) in enumerate(pick):
@@ -106,20 +122,23 @@ def report(a) -> None:
     C = json.loads((out / "compare.json").read_text())
     pool, scores = C["pool"], C["scores"]
     na, nb = Path(C["a"]).name, Path(C["b"]).name
+    ns = f"{nb} (archive)"
+    groups = [nb] + ([ns] if any(e["run"] == ns for e in pool) else [])
     L = [f"# {nb} vs {na}: final archives\n",
-         f"{sum(e['run'] == na for e in pool)} + {sum(e['run'] == nb for e in pool)} elites, each against "
-         f"{len(C['opponents'][0])} random elites of the pooled archives, both orders. AUC = P(a {nb} elite outscores "
-         f"a {na} elite); 0.5 = no difference. Lineage-correlated elites make p optimistic.\n",
-         f"| judge / prompt | mean {na} | mean {nb} | AUC | p | {nb} share of top {TOP} |", "|---|---|---|---|---|---|"]
+         " + ".join(f"{sum(e['run'] == g for e in pool)} {g}" for g in [na] + groups) +
+         f", each against {len(C['opponents'][0])} random members of the whole pool, both orders. AUC = P(a member of "
+         f"the row's group outscores a {na} elite); 0.5 = no difference. Lineage-correlated elites make p optimistic.\n",
+         f"| judge / prompt | group | mean {na} | mean group | AUC | p | group share of top {TOP} |",
+         "|---|---|---|---|---|---|---|"]
     for k, sc in scores.items():
-        ia = [i for i, e in enumerate(pool) if e["run"] == na and str(i) in sc]
-        ib = [i for i, e in enumerate(pool) if e["run"] == nb and str(i) in sc]
-        va, vb = [sc[str(i)] for i in ia], [sc[str(i)] for i in ib]
-        A_, p = auc(vb + va, [1] * len(vb) + [0] * len(va), n_perm=5000)
+        va = [sc[str(i)] for i, e in enumerate(pool) if e["run"] == na and str(i) in sc]
         top = sorted(sc, key=lambda i: -sc[i])[:TOP]
-        share = np.mean([pool[int(i)]["run"] == nb for i in top])
-        L.append(f"| {k} | {np.mean(va):.3f} | {np.mean(vb):.3f} | {A_:.2f} | {p:.3f} | {share:.2f} |")
-    for nm in (na, nb):
+        for g in groups:
+            vb = [sc[str(i)] for i, e in enumerate(pool) if e["run"] == g and str(i) in sc]
+            A_, p = auc(vb + va, [1] * len(vb) + [0] * len(va), n_perm=5000)
+            share = np.mean([pool[int(i)]["run"] == g for i in top])
+            L.append(f"| {k} | {g} | {np.mean(va):.3f} | {np.mean(vb):.3f} | {A_:.2f} | {p:.3f} | {share:.2f} |")
+    for nm in [na] + groups:
         es = [e for e in pool if e["run"] == nm]
         L.append(f"\n{nm}: {len(es)} elites, {len({e['root'] for e in es})} seed lineages, mean motion "
                  f"{np.mean([e['motion'] for e in es]):.2f}")
@@ -129,12 +148,13 @@ def report(a) -> None:
         L += ["", "**Felix's blind check** (12 random elites per archive, shuffled): \"something unusual?\"", "",
               "| archive | unusual | typical | unsure |", "|---|---|---|---|"]
         cnt = {}
-        for nm in (na, nb):
+        for nm in [na] + groups:
             r = [ans[t["id"]]["answer"] for t in tasks if t["selection"] == nm and t["id"] in ans]
             cnt[nm] = (r.count("new"), r.count("not_new"))
             L.append(f"| {nm} | {r.count('new')} | {r.count('not_new')} | {r.count('unsure')} |")
-        if all(sum(v) for v in cnt.values()):
-            L.append(f"\nOne-sided Fisher ({nb} more often unusual): p = {fisher_greater(*cnt[nb], *cnt[na]):.3f}")
+        for g in groups:
+            if sum(cnt[g]) and sum(cnt[na]):
+                L.append(f"\nOne-sided Fisher ({g} more often unusual than {na}): p = {fisher_greater(*cnt[g], *cnt[na]):.3f}")
         dec = [t for t in tasks if t["id"] in ans and ans[t["id"]]["answer"] in ("new", "not_new")]
         if len({ans[t["id"]]["answer"] for t in dec}) == 2 and "luna/surprise" in scores:
             A_, p = auc([scores["luna/surprise"][str(t["pool_index"])] for t in dec],
