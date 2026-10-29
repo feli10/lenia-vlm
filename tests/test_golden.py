@@ -25,7 +25,7 @@ for p in (ROOT / "src", ROOT / "scripts"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
-from lenia.judge import Judge, Query, image_hash          # noqa: E402
+from lenia.judge import Judge, MultiQuery, Query, image_hash          # noqa: E402
 from lenia.prompts import get_prompt                       # noqa: E402
 
 from lenia import mace as M                                   # noqa: E402
@@ -63,6 +63,7 @@ def compute() -> dict:
     with tempfile.TemporaryDirectory() as d:
         j = Judge("jev", {"backend": "jev", "model": "jev-latest"}, Path(d) / "c.sqlite")
         out["cache_key"] = j.key(Query(M.PROMPT_ID, img, img[::-1].copy()))[:16]
+        out["cache_key/multi"] = [k[:16] for k in j.multi_keys(MultiQuery((M.PROMPT_ID, SURPRISE), img, img[::-1].copy()))]
     rules, A0 = M.founders(Namespace(lineages=2, rule_seed=3, R=13, beta=2.0), (48, 48))
     out["founders"] = _h([r.to_dict() for r in rules])
     out["mutate"] = _h(mutate(rules[0], np.random.default_rng(0), 3.0).to_dict())
@@ -109,7 +110,8 @@ EXPECTED = {
     "prompt/interest": "9b858956b3910b81",
     "menu/session_match": "824bc47345e20218",
     "menu/steer_groups": "54b0d7e501852ce9",
-    "menu/none": "none"
+    "menu/none": "none",
+    "cache_key/multi": ["de49508527e84dd2", "3d301071e3a401d2"]   # added 2026-10-29 (judge.MultiQuery, gate 0e)
 }   # recorded 2026-10-28 (cleanup); prompts, founders, mutate, simulate unchanged from before it; menus and interest added before the prompt move
 
 

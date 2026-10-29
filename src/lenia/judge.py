@@ -77,6 +77,19 @@ class Query:
 
 
 @dataclass
+class MultiQuery:
+    """Several duel prompts about the same two images, asked in ONE request. Jev bills the pictures once per request
+    (~97% of a duel) and each extra question only its own text. Answers are cached under a key kind of their own
+    ("multi") that includes the whole question list and the question's place in it, so a combined answer is never
+    served for a single-question Query or for another combination (gate 0e checks whether they agree). Image costs
+    dominate, so a request is re-sent unless every one of its answers is cached."""
+    prompt_ids: tuple
+    first: np.ndarray
+    second: np.ndarray
+    sample: int = 0
+
+
+@dataclass
 class ChoiceQuery:
     image: np.ndarray      # (H, W, 3) uint8
     instructions: str      # "{W}" is replaced by the backend's name for the image
@@ -258,6 +271,94 @@ class Judge:
         if n_fail:
             self.log(f"[{desc}] WARNING: {n_fail} queries failed (not cached; re-run to retry)")
         return final
+
+    # -- several duel questions in one request (gate 0e)
+    def multi_keys(self, q: "MultiQuery") -> list:
+        base = {"backend": self.backend, "model": self.model, "kind": "multi",
+                "prompts": [get_prompt(p) for p in q.prompt_ids], "a": image_hash(q.first), "b": image_hash(q.second),
+                "sample": q.sample}
+        if self.backend == "fake":
+            base["fake"] = [self.cfg.get("fake_position_bias"), self.cfg.get("fake_noise")]
+        return [hashlib.sha256(json.dumps({**base, "q": i}, sort_keys=True).encode()).hexdigest()
+                for i in range(len(q.prompt_ids))]
+
+    def judge_multi(self, queries: list, desc: str = "judge multi") -> list:
+        """queries: [MultiQuery]. Returns, per query, one Verdict per prompt (in prompt_ids order)."""
+        keys = [self.multi_keys(q) for q in queries]
+        out = [[self.cache.get(k) for k in ks] for ks in keys]
+        uniq, seen = [], set()
+        for i, vs in enumerate(out):
+            if any(v is None for v in vs) and keys[i][0] not in seen:
+                seen.add(keys[i][0])
+                uniq.append(i)
+        per = float(self.cfg.get("est_cost_per_call_usd", 0))
+        est = sum(per * (1 + 0.03 * (len(queries[i].prompt_ids) - 1)) for i in uniq)   # text ~3% per extra question
+        self.log(f"[{desc}] {len(queries)} requests: {len(queries) - len(uniq)} cached, {len(uniq)} new (est. ${est:.3f})")
+        self._check_cap(len(uniq), est, desc)
+        if est > float(self.cfg.get("budget_usd", 2)) and not self.yes:
+            raise BudgetError(f"estimated ${est:.2f} for {len(uniq)} requests exceeds budget_usd; re-run with --yes")
+        if uniq and self.backend != "fake" and not self._key_value():
+            raise FatalAPIError(f"{KEY_ENV[self.backend]} is not set (put it in .env)")
+        results = {}
+        if uniq:
+            workers = 1 if self.backend == "fake" else int(self.cfg.get("max_workers", 8))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = {ex.submit(self._call_multi, queries[i]): i for i in uniq}
+                for n, fut in enumerate(as_completed(futs), 1):
+                    i = futs[fut]
+                    vs = fut.result()
+                    if all(v.ok for v in vs):                   # all answers of a request, or none
+                        for k, v, pid in zip(keys[i], vs, queries[i].prompt_ids):
+                            self.cache.put(k, v, self.model, pid)
+                    elif self.verbose or n <= 3:
+                        self.log(f"[{desc}] failed request: {next(v.raw for v in vs if not v.ok)[:300]}")
+                    for v in vs:
+                        self._note(v, desc)
+                    results[keys[i][0]] = vs
+        self._all_failed([v for vs in results.values() for v in vs], desc)
+        final = [vs if all(v is not None for v in vs) else results[ks[0]] for vs, ks in zip(out, keys)]
+        n_fail = sum(not all(v.ok for v in vs) for vs in final)
+        if n_fail:
+            self.log(f"[{desc}] WARNING: {n_fail} requests failed (not cached; re-run to retry)")
+        return final
+
+    def _call_multi(self, q: "MultiQuery") -> list:
+        """One request with len(prompt_ids) choice questions q1, q2, ... about the same two images. The request's cost
+        is booked on the first answer, so the cache's total stays exact."""
+        if self.backend == "fake":
+            return [self._call_fake(Query(p, q.first, q.second, q.sample)) for p in q.prompt_ids]
+        key = self._key_value()
+        names = [f"q{i + 1}" for i in range(len(q.prompt_ids))]
+        if self.backend == "decisions":
+            ps = [render_prompt(p, "the first image", "the second image") for p in q.prompt_ids]
+            img = lambda a: {"type": "image_url", "image_url": {"url": "data:image/png;base64," + png_b64(a)}}
+            body = {"model": self.model, "state": ["First image:", img(q.first), "Second image:", img(q.second)],
+                    "questions": {n: {"type": "choice", "instructions": p["instructions"],
+                                      "criteria": {"first": p["first"], "second": p["second"]}} for n, p in zip(names, ps)}}
+            data = self._post(DECISIONS_URL, body, {"Authorization": f"Bearer {key}", "X-Title": "lenia-vlm"})
+            cost_of = lambda d: float((d.get("usage") or {}).get("cost") or 0)
+        else:   # jev
+            ps = [render_prompt(p, "`first`", "`second`") for p in q.prompt_ids]
+            ra, rb = (str(uuid.UUID(hex=image_hash(a).ljust(32, "0"))) for a in (q.first, q.second))
+            if ra == rb:
+                rb = str(uuid.UUID(hex=hashlib.md5((rb + "b").encode()).hexdigest()))
+            body = {"model": self.model, "state": {"first": ra, "second": rb},
+                    "assets": {ra: {"type": "image", "format": "png", "data_base64": png_b64(q.first)},
+                               rb: {"type": "image", "format": "png", "data_base64": png_b64(q.second)}},
+                    "questions": {n: {"type": "choice", "instructions": p["instructions"],
+                                      "criteria": {"first": p["first"], "second": p["second"]}} for n, p in zip(names, ps)}}
+            data = self._post(JEV_URL, body, {"Authorization": f"Bearer {key}", "TypeSafe-Danger-Zone-Images": "true"})
+            cost_of = lambda d: float((d.get("usage") or {}).get("input_tokens") or 0) * JEV_USD_PER_TOKEN
+        if "_error" in data:
+            return [Verdict(None, None, data["_error"]) for _ in names]
+        cost, snap, out = cost_of(data), data.get("model"), []
+        for i, n in enumerate(names):
+            ans = (data.get("answers") or {}).get(n) or {}
+            pf, choice = parse_probs(ans)
+            c = cost if i == 0 else 0.0
+            out.append(Verdict(None, None, json.dumps(data)[:2000], c) if pf is None else
+                       Verdict(pf, choice, json.dumps(ans), c, snapshot=snap))
+        return out
 
     # -- multiple choice: one image, a menu of options
     def choose_many(self, queries: list, desc: str = "choose") -> list:
