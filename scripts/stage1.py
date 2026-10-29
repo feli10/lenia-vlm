@@ -378,6 +378,28 @@ def do_review(a, s1: Path, st: dict) -> None:
     st["reviewed"] = True
 
 
+def same_platform(evals: "Evals", st: dict, ea) -> None:
+    """Shared mutation randomness only holds if every arm draws bit-identical mutants. np.exp differs in the last bit
+    between x86 (Colab) and ARM (Mac), and NumPy may change between Colab images. If an earlier arm already simulated
+    the first trigger's step-1 mutants, this arm's must be the same rules (the same simulation-cache keys)."""
+    if not any(evals.dir.glob("*.json")):
+        return
+    tr = st["triggers"][0]
+    rng = np.random.default_rng([st["seed"], tr["index"], 1])
+    par = Rule.from_dict(tr["start_rule"])
+    keys = []
+    for _ in range(st["mutants"]):
+        m = mutate(par, rng, ea.mut_scale)
+        m.flow = "mace"
+        m.beta = float(np.clip(par.beta * np.exp(rng.normal(0, 0.1)), 0.5, 4.0))
+        keys.append(evals.key(m))
+    missing = [k for k in keys if not (evals.dir / f"{k}.json").exists()]
+    if missing:
+        sys.exit(f"{len(missing)}/{len(keys)} of {tr['id']}'s step-1 mutants are not the ones an earlier arm drew: this machine "
+                 "computes mutations differently (another CPU type or NumPy version), so the arms would not share mutation "
+                 "randomness. Run every arm of a seed in the same environment (Colab).")
+
+
 def expedition(a) -> None:
     s1, run = Path(a.out), Path(a.run)
     adir = s1 / "arms" / a.arm
@@ -397,6 +419,8 @@ def expedition(a) -> None:
             print(f"{tr['id']}: {g['sees']} -> {g['push']}", file=sys.stderr)
     evals = Evals(s1 / "evals", ea)
     M = st["mutants"]
+    if st["step"] == 0:
+        same_platform(evals, st, ea)
     fh = open(adir / "duels.csv", "a", newline="")
     log = csv.writer(fh)
     if fh.tell() == 0:

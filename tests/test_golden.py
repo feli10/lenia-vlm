@@ -71,7 +71,10 @@ def compute() -> dict:
         out["cache_key/multi"] = [k[:16] for k in j.multi_keys(MultiQuery((M.PROMPT_ID, SURPRISE), img, img[::-1].copy()))]
     rules, A0 = M.founders(Namespace(lineages=2, rule_seed=3, R=13, beta=2.0), (48, 48))
     out["founders"] = _h([r.to_dict() for r in rules])
-    out["mutate"] = _h(mutate(rules[0], np.random.default_rng(0), 3.0).to_dict())
+    # rounded: np.exp differs in the last bit between x86 (Colab) and ARM (Mac), which changed an exact hash
+    rnd = lambda o: ({k: rnd(v) for k, v in o.items()} if isinstance(o, dict) else [rnd(v) for v in o]
+                     if isinstance(o, (list, tuple)) else round(o, 10) if isinstance(o, float) else o)
+    out["mutate"] = _h(rnd(mutate(rules[0], np.random.default_rng(0), 3.0).to_dict()))
     final, films = M.simulate(rules, A0, 12, (48, 48), gap=4)
     out["simulate"] = [float(final.sum()), float((final ** 2).sum()), float(final[0, 0, 24, 24])]
     out["texture"] = float(texture(final[0]))
@@ -105,7 +108,7 @@ EXPECTED = {
     "image_hash": "6457bea750674dad26db",
     "cache_key": "2cb0284a9fa3e54f",
     "founders": "380698ada0694a32",
-    "mutate": "b774b039cb5f57e3",
+    "mutate": "8432a5d54ebb9323",          # 2026-10-29: now rounded to 10 decimals (x86 vs ARM last-bit np.exp); same rule
     "simulate": [
         6517.357421875,
         5264.0029296875,

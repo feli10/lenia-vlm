@@ -8,11 +8,11 @@ dependencies = [
     "pillow>=10",
     "pyyaml>=6",
     "matplotlib>=3.8",
-    "google-genai>=2.33.0",
 ]
 
 [project.optional-dependencies]
 gpu = ["torch>=2.2"]                   # `uv sync --extra gpu`; preinstalled on Colab
+vertex = ["google-genai>=2.33.0"]      # Gemini on Vertex (lenia.describe); optional so Colab's pinned google-auth stays put
 
 [dependency-groups]
 dev = ["pytest>=8"]
