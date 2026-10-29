@@ -38,6 +38,7 @@ rsynced to `runs/` (git-ignored) for analysis on the Mac.
 | `scripts/goal_session.py` | goal-steered sessions with library v3 goals (`data/goal_library_v3.json`), the expedition machinery |
 | `scripts/qd_compare.py` | compare archives with held-out Luna, then your blind "unusual?" ratings (`rate`) |
 | `scripts/res_check.py` | gate 0f: Jev on smaller pictures (done; keep for reference) |
+| `scripts/pin_check.py` | confirms the pinned Jev version answers like our past results (~$0.015) |
 
 Each script's docstring lists its commands, including an offline `--judge fake` dry run.
 

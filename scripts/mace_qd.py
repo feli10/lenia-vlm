@@ -341,10 +341,11 @@ def run(a) -> None:
     (out / "snapshots").mkdir(exist_ok=True)
     cfg = load(a.config)
     load_env(REPO_ROOT / ".env")
-    judge = Judge(a.judge, {**cfg["judges"]["defaults"], **cfg["judges"][a.judge]}, out / "judge_cache.sqlite", yes=True)
+    judge = Judge(a.judge, {**cfg["judges"]["defaults"], **cfg["judges"][a.judge], "max_run_usd": a.max_usd},
+                  out / "judge_cache.sqlite", yes=True)
     if (out / "state.json").exists():
         st = json.loads((out / "state.json").read_text())
-        keep = ("iterations", "backend", "judge", "out", "config", "sim_batch")
+        keep = ("iterations", "backend", "judge", "out", "config", "sim_batch", "max_usd")
         if "parent_select" not in st["args"]:                    # older runs: uniform parent selection
             st["args"]["parent_select"] = "uniform"
         if st["args"]["parent_select"] == "surprise":
@@ -632,6 +633,8 @@ def main() -> None:
     r.add_argument("--sarch-threshold", type=float, default=0.6, help="initial surprise score needed to join (adapts)")
     r.add_argument("--sarch-max", type=int, default=200)
     r.add_argument("--seed", type=int, default=0)
+    r.add_argument("--max-usd", type=float, default=6.0, help="hard cap on this run's judge spend, across resumes "
+                   "(a 100-iteration --sarch run costs ~$3); raise it and re-run to continue")
     m = sub.add_parser("map")
     m.add_argument("--out", required=True)
     c = sub.add_parser("check")

@@ -27,4 +27,7 @@ change. Changing a prompt or `lenia.mace.picture` on purpose means starting fres
   the second image, P(first) about 0.41; Luna the first, about 0.58).
 - Jev bills only input tokens, about 2,640 per duel of two 644-px pictures ($0.00011). Smaller pictures:
   484 px is validated for the surprise duel only (gate 0f, `runs/res-check`).
-- The config calls `jev-latest`, an alias; pin a version before the next long programme.
+- Jev is pinned (`configs/lenia.yaml`, `jev-1.14.0`; `scripts/pin_check.py` confirms it). Every cached answer records
+  the provider's snapshot (`snapshots` table); a change mid-run logs a warning.
+- Every script that calls a judge takes `--max-usd`: a hard cap on the run's spend, counted from its own cache, so
+  it holds across resumes and is not overridden by `--yes`. A batch in which every call fails stops the run.

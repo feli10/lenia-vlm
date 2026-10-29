@@ -61,6 +61,7 @@ class Verdict:
     raw: str
     cost: float = 0.0
     cached: bool = False
+    snapshot: str | None = None   # the exact model version the provider reports (e.g. jev-1.14-20261014)
 
     @property
     def ok(self) -> bool:
@@ -136,6 +137,8 @@ class Cache:
         self._db = sqlite3.connect(str(path), check_same_thread=False)
         self._db.execute("CREATE TABLE IF NOT EXISTS verdicts (key TEXT PRIMARY KEY, p_first REAL, choice TEXT,"
                          " raw TEXT, cost REAL, model TEXT, prompt_id TEXT, created REAL)")
+        # model versions live in their own table, so the verdicts table (and older code reading it) is unchanged
+        self._db.execute("CREATE TABLE IF NOT EXISTS snapshots (key TEXT PRIMARY KEY, snapshot TEXT)")
         self._db.commit()
 
     def get(self, key: str) -> Verdict | None:
@@ -147,7 +150,19 @@ class Cache:
         with self._lock:
             self._db.execute("INSERT OR REPLACE INTO verdicts VALUES (?,?,?,?,?,?,?,?)",
                              (key, v.p_first, v.choice, v.raw, v.cost, model, prompt_id, time.time()))
+            if v.snapshot:
+                self._db.execute("INSERT OR REPLACE INTO snapshots VALUES (?,?)", (key, v.snapshot))
             self._db.commit()
+
+    def snapshots(self) -> dict:
+        """Model version -> number of cached answers it gave."""
+        with self._lock:
+            return dict(self._db.execute("SELECT snapshot, COUNT(*) FROM snapshots GROUP BY snapshot").fetchall())
+
+    def total_cost(self) -> float:
+        """Everything this cache has paid for: every call of the run it belongs to, across resumes."""
+        with self._lock:
+            return float(self._db.execute("SELECT COALESCE(SUM(cost), 0) FROM verdicts").fetchone()[0])
 
 
 # ---------- judge ----------
@@ -163,6 +178,34 @@ class Judge:
         self.yes, self.verbose = yes, verbose
         self.log = log or (lambda m: print(m, file=sys.stderr, flush=True))
         self.spent = 0.0
+        self.cap = float(jcfg.get("max_run_usd") or 0)       # hard cap on this run's total spend (0 = none)
+        self.snapshot = None                                   # the model version seen first in this process
+
+    def _check_cap(self, n: int, est: float, desc: str) -> None:
+        """Refuse a batch that would take the run past max_run_usd. Not overridden by yes=True."""
+        if not self.cap or not n:
+            return
+        so_far = self.cache.total_cost()
+        if so_far + est > self.cap:
+            raise BudgetError(f"[{desc}] this run has spent ${so_far:.2f} (its judge cache); {n} more calls (~${est:.2f}) "
+                              f"would pass the cap of ${self.cap:.2f}. Nothing was called. Re-run with a higher --max-usd: "
+                              "the run resumes where it stopped.")
+
+    def _note(self, v: "Verdict", desc: str) -> None:
+        """Spend, and a warning if the provider's model version changes during a run."""
+        self.spent += v.cost
+        if v.snapshot:
+            if self.snapshot is None:
+                self.snapshot = v.snapshot
+            elif v.snapshot != self.snapshot:
+                self.log(f"[{desc}] WARNING: model version changed mid-run: {self.snapshot} -> {v.snapshot}")
+                self.snapshot = v.snapshot
+
+    def _all_failed(self, results: list, desc: str) -> None:
+        """A batch where every new call failed (e.g. an unknown model name) stops the run instead of reading as
+        a batch of rejections."""
+        if len(results) >= 4 and not any(v.ok for v in results):
+            raise FatalAPIError(f"[{desc}] all {len(results)} new calls failed; first error: {results[0].raw[:300]}")
 
     def _key_value(self) -> str | None:
         env = KEY_ENV.get(self.backend)
@@ -185,6 +228,7 @@ class Judge:
                 uniq.append(i)
         est = len(uniq) * float(self.cfg.get("est_cost_per_call_usd", 0))
         self.log(f"[{desc}] {len(queries)} queries: {len(queries) - len(uniq)} cached, {len(uniq)} new (est. ${est:.3f})")
+        self._check_cap(len(uniq), est, desc)
         if est > float(self.cfg.get("budget_usd", 2)) and not self.yes:
             raise BudgetError(f"estimated ${est:.2f} for {len(uniq)} calls exceeds budget_usd={self.cfg.get('budget_usd')}; "
                               "re-run with --yes")
@@ -203,11 +247,12 @@ class Judge:
                         self.cache.put(keys[i], v, self.model, queries[i].prompt_id)
                     elif self.verbose or done < 3:
                         self.log(f"[{desc}] failed call: {v.raw[:300]}")
-                    self.spent += v.cost
+                    self._note(v, desc)
                     results[keys[i]] = v
                     done += 1
                     if done % step == 0 or done == len(uniq):
                         self.log(f"[{desc}] {done}/{len(uniq)} done, spent ${self.spent:.4f}")
+        self._all_failed(list(results.values()), desc)
         final = [v if v is not None else results[k] for v, k in zip(out, keys)]
         n_fail = sum(not v.ok for v in final)
         if n_fail:
@@ -226,6 +271,7 @@ class Judge:
         todo = [i for i, v in enumerate(out) if v is None]
         est = len(todo) * float(self.cfg.get("est_cost_per_call_usd", 0))
         self.log(f"[{desc}] {len(queries)} queries: {len(queries) - len(todo)} cached, {len(todo)} new (est. ${est:.3f})")
+        self._check_cap(len(todo), est, desc)
         if est > float(self.cfg.get("budget_usd", 2)) and not self.yes:
             raise BudgetError(f"estimated ${est:.2f} exceeds budget_usd; re-run with --yes")
         if todo and self.backend != "fake" and not self._key_value():
@@ -242,8 +288,9 @@ class Judge:
                         self.cache.put(keys[i], v, self.model, "choice")
                     elif n <= 3:
                         self.log(f"[{desc}] failed call: {v.raw[:300]}")
-                    self.spent += v.cost
+                    self._note(v, desc)
                     res[i] = v
+        self._all_failed(list(res.values()), desc)
         final = [res.get(i, v) for i, v in enumerate(out)]
         probs = []
         for v in final:
@@ -293,7 +340,8 @@ class Judge:
                 return Verdict(None, None, json.dumps(data)[:2000])
         tot = sum(probs.values())
         probs = {o: probs.get(o, 0.0) / tot for o in crit}
-        return Verdict(1.0, "first", json.dumps({"probs": probs, "choice": ans.get("choice")}), cost_of(data))
+        return Verdict(1.0, "first", json.dumps({"probs": probs, "choice": ans.get("choice")}), cost_of(data),
+                       snapshot=data.get("model"))
 
     # -- internals
     def _post(self, url: str, body: dict, headers: dict) -> dict:
@@ -346,7 +394,7 @@ class Judge:
         pf, choice = parse_probs(ans)
         if pf is None:
             return Verdict(None, None, json.dumps(data)[:2000])
-        return Verdict(pf, choice, json.dumps(ans), cost_of(data))
+        return Verdict(pf, choice, json.dumps(ans), cost_of(data), snapshot=data.get("model"))
 
     def _call_fake(self, q: Query) -> Verdict:
         def score(img):

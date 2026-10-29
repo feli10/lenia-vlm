@@ -165,3 +165,32 @@ def test_label_page_and_stats(tmp_path):
     a, p = auc([0.9, 0.8, 0.2, 0.1], [1, 1, 0, 0], n_perm=500)
     assert a == 1.0 and p < 0.5
     assert abs(fisher_greater(6, 0, 1, 6) - 0.0047) < 0.001
+
+
+def test_spend_cap_snapshots_and_all_failed(tmp_path, monkeypatch):
+    """The run-level cap refuses a batch even with yes=True; model versions are recorded; a batch where every
+    call fails stops the run instead of reading as rejections."""
+    from lenia.judge import BudgetError, FatalAPIError, Judge, Query, Verdict
+    img = np.full((40, 40, 3), 200, np.uint8)
+    imgs = [img.copy() for _ in range(4)]
+    for k, im in enumerate(imgs):
+        im[k:k + 5] = 10
+    qs = [Query("evolve_complexity_world", imgs[i], imgs[(i + 1) % 4]) for i in range(4)]
+    j = Judge("fake", {"backend": "fake", "est_cost_per_call_usd": 1.0, "max_run_usd": 2.5}, tmp_path / "a.sqlite",
+              yes=True, log=lambda m: None)
+    try:
+        j.judge_many(qs)
+        assert False, "cap must refuse a $4 batch under a $2.50 cap"
+    except BudgetError:
+        pass
+    assert j.cache.total_cost() == 0                     # nothing was called
+    v = Verdict(0.7, "first", "{}", 0.001, snapshot="jev-1.14-20261014")
+    j.cache.put("k", v, "jev-1.14.0", "p")
+    assert j.cache.snapshots() == {"jev-1.14-20261014": 1} and abs(j.cache.total_cost() - 0.001) < 1e-12
+    j2 = Judge("fake", {"backend": "fake"}, tmp_path / "b.sqlite", yes=True, log=lambda m: None)
+    monkeypatch.setattr(Judge, "_call", lambda self, q: Verdict(None, None, "HTTP 400: unknown model"))
+    try:
+        j2.judge_many(qs)
+        assert False, "an all-failed batch must stop the run"
+    except FatalAPIError as e:
+        assert "unknown model" in str(e)

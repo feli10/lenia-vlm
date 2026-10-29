@@ -87,7 +87,8 @@ def score(a) -> None:
     load_env(REPO_ROOT / ".env")
     scores = {}
     for jn, pname, pid in (("luna", "surprise", SURPRISE), ("jev", "surprise", SURPRISE), ("luna", "complexity", COMPLEXITY)):
-        judge = Judge(jn, {**cfg["judges"]["defaults"], **cfg["judges"][jn]}, out / "judge_cache.sqlite", yes=True)
+        judge = Judge(jn, {**cfg["judges"]["defaults"], **cfg["judges"][jn], "max_run_usd": a.max_usd},
+                      out / "judge_cache.sqlite", yes=True)
         qs, meta = [], []
         for i in range(len(pool)):
             for j in opp[i]:
@@ -173,6 +174,7 @@ def main() -> None:
     ap.add_argument("--out", default="runs/qd-compare")
     ap.add_argument("--opponents", type=int, default=6)
     ap.add_argument("--config", default=None)
+    ap.add_argument("--max-usd", type=float, default=5.0, help="hard cap on judge spend (all judges, one cache), across resumes")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--port", type=int, default=8769, help="rate: local port of the rating page")
     a = ap.parse_args()

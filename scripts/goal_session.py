@@ -174,7 +174,8 @@ def run(a) -> None:
     (out / "img").mkdir(parents=True, exist_ok=True)
     cfg = load(a.config)
     load_env(REPO_ROOT / ".env")
-    judge = Judge(a.judge, {**cfg["judges"]["defaults"], **cfg["judges"][a.judge]}, out / "judge_cache.sqlite", yes=True)
+    judge = Judge(a.judge, {**cfg["judges"]["defaults"], **cfg["judges"][a.judge], "max_run_usd": a.max_usd},
+                  out / "judge_cache.sqlite", yes=True)
     L = library(a)
     if (out / "state.json").exists():
         st = json.loads((out / "state.json").read_text())
@@ -327,7 +328,8 @@ def check(a) -> None:
     load_env(REPO_ROOT / ".env")
     res = {}
     for jn in a.judges.split(","):
-        judge = Judge(jn, {**cfg["judges"]["defaults"], **cfg["judges"][jn]}, out / "check_cache.sqlite", yes=True)
+        judge = Judge(jn, {**cfg["judges"]["defaults"], **cfg["judges"][jn], "max_run_usd": a.max_usd},
+                      out / "check_cache.sqlite", yes=True)
         qs = []
         for t, i, x, y, kind, g in rows:
             pid = attain_prompt(g) if kind == "attain" else INTEREST
@@ -563,6 +565,7 @@ def main() -> None:
     ap.add_argument("--judge", default="jev", help="driver (run)")
     ap.add_argument("--judges", default="luna,jev", help="held-out first (check)")
     ap.add_argument("--config", default=None)
+    ap.add_argument("--max-usd", type=float, default=3.0, help="hard cap on judge spend per cache, across resumes")
     ap.add_argument("--backend", default="numpy", help="numpy | auto | mps | cuda")
     ap.add_argument("--elites", type=int, default=10)
     ap.add_argument("--goal-branches", type=int, default=3)

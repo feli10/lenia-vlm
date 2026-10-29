@@ -13,7 +13,9 @@ judges:                                # judge backends (keys in .env); scripts 
     est_cost_per_call_usd: 0.00011     # measured on MaCE duels (qd5-compare-s0)
   jev:
     backend: jev                       # TypeSafe System One; image input is experimental
-    model: jev-latest                  # jev-preview = newest release
+    model: jev-1.14.0                  # pinned 2026-10-28 (was jev-latest, an alias that moves to each release);
+                                       # scripts/pin_check.py confirms the name and the snapshot. Changing it
+                                       # starts fresh caches (the model name is part of every cache key).
     est_cost_per_call_usd: 0.00011     # measured: ~2,640 input tokens per duel of two 644-px pictures
     max_workers: 4
   fake:

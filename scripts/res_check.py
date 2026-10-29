@@ -119,7 +119,8 @@ def run(a) -> None:
     out.mkdir(parents=True, exist_ok=True)
     cfg = load(a.config)
     load_env(REPO_ROOT / ".env")
-    jc = {**cfg["judges"]["defaults"], **cfg["judges"][a.judge], "est_cost_per_call_usd": tok(644) * JEV_USD_PER_TOKEN}
+    jc = {**cfg["judges"]["defaults"], **cfg["judges"][a.judge], "est_cost_per_call_usd": tok(644) * JEV_USD_PER_TOKEN,
+          "max_run_usd": a.max_usd}
     judge = Judge(a.judge, jc, out / "judge_cache.sqlite", yes=True)
     res = json.loads((out / "results.json").read_text()) if (out / "results.json").exists() else {}
     imgs = {}
