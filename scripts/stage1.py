@@ -11,6 +11,7 @@ Step 5 on, the expeditions (Colab: GPU and judge calls; see colab/mace.ipynb):
   python scripts/stage1.py expedition --arm L  --run RUNS/mace-qd5-sarch-s0 --out RUNS/stage1-s0 --backend auto
   python scripts/stage1.py check      --arm L  --run RUNS/mace-qd5-sarch-s0 --out RUNS/stage1-s0   # Luna; gate 0c for L
   ... then --arm N, NR, NS (NR and NS need N's goals; their review calls need Gemini: GOOGLE_CLOUD_PROJECT + ADC)
+  Expeditions are v2 (fixed reference: the trigger's start) in <out>/exp-v2/; <out>/arms/L is v1 (see below).
 
 Triggers: every surprise-archive member of the base run is re-scored against the run's final map, and each
 lineage (seed root) contributes its best member. A member's stored score was measured against the map and archive
@@ -166,22 +167,35 @@ def typical(run: Path, trigger: dict, k: int = 4, seed: int = 0) -> list:
     return [el[int(j)] for j in rng.choice(len(el), k, replace=False)]
 
 
-# ---------- expeditions (build step 5) ----------
+# ---------- expeditions (build step 5; v2 after arm L's first run, 10-29) ----------
 #
-# Every arm runs one expedition per trigger: EXP_STEPS steps; each step makes MUTANTS mutants of the current parent
-# (lenia.mace.mutate + beta jitter, exactly as the base run), grows each from the fixed start, drops grid noise, and asks
-# Jev one combined request per order (gate 0e): steer (the arm's goal), the floor (COMPLEXITY) and surprise (logged).
-# The child with the highest steer P >= STEER_T whose floor P >= FLOOR_T becomes the parent.
-# Arms differ only in the goal: L = a library-v3 goal matched by Jev; N = the VLM's {sees, push}; NR = N's goal, one review
-# after step REVIEW_AT (continue / refine, REVIEW_R); NS = the same plus "switch" (REVIEW_S). Mutation randomness is
-# seeded by (trigger index, step), so arms whose parents agree draw identical mutants; with the shared judge cache and
-# the simulation cache (evals/), NR and NS replay N's first REVIEW_AT steps, and every "continue", at no cost.
+# Every arm runs one expedition per trigger: EXP_STEPS steps of MUTANTS mutants of the current parent (lenia.mace.mutate
+# + beta jitter, as the base run), each grown from the fixed start, grid noise dropped. Each child is judged against a
+# FIXED reference, both orders, one combined request (gate 0e): goal progress (lenia.prompts.attain_prompt) against the
+# goal's reference world, and complexity and surprise against the trigger's start. The child with the highest goal
+# score is accepted if that score beats the parent's by >= MARGIN (the judge's noise band) and its complexity against the
+# start is >= K_FLOOR. So progress accumulates on one scale and complexity cannot slide below where it began.
+#
+# Why v2 (arm L v1, runs/stage1-s0/arms/L): v1 accepted the child Jev preferred over its *parent* (steer >= 0.6) with a
+# complexity floor also against the parent. Luna saw almost no goal progress (attain 0.59; the pilot: 0.53), because a
+# best-of-16 duel against a moving parent mostly picks up the judge's quirks and nothing accumulates; and the parent
+# floor let complexity slide one permitted step at a time (L55: 8 steps, Luna complexity 0.30 vs start). It also
+# rejected 80% of goal-passing children, since moving toward these goals usually simplifies a world in Jev's eyes.
+# Caveat: Jev now drives with the question Luna evaluates (attain); different models, and Felix's ratings stay independent.
+#
+# Arms differ only in the goal: L = a library-v3 goal matched by Jev; N = the VLM's {sees, push}; NR = N's goal plus one
+# review after step REVIEW_AT (continue / refine); NS = the same plus "switch". A refine re-scores the parent under the
+# new goal (reference: the start); a switch makes the step-REVIEW_AT parent the new goal's reference (complexity stays
+# anchored to the start). Mutation randomness is seeded by (trigger index, step), so arms whose parents agree draw
+# identical mutants; with the shared judge cache and the simulation cache (evals/), NR and NS replay N's first steps.
 # From papers: steering an evolutionary search with a foundation model's goal (ASAL; the Picbreeder line). Ours: the
-# guarded expedition (steer + complexity floor in one request), arms as treatments on identical starts with shared
-# mutation randomness, the single scheduled review, and refine vs switch as separate options.
+# fixed-reference guarded expedition, arms as treatments on identical starts with shared mutation randomness, the single
+# scheduled review, and refine vs switch as separate options.
 
 ARMS = ("L", "N", "NR", "NS")
-EXP_STEPS, MUTANTS, STEER_T, FLOOR_T, REVIEW_AT = 10, 16, 0.6, 0.4, 5
+EXP_STEPS, MUTANTS, REVIEW_AT = 10, 32, 5
+MARGIN, K_FLOOR = 0.03, 0.45
+EXP_DIR = "exp-v2"                        # arms/ holds v1 (arm L only), kept as the record of why v1 was replaced
 
 
 def eval_settings(run: Path, a) -> argparse.Namespace:
@@ -335,17 +349,19 @@ def setup_arm(a, s1: Path, run: Path, T: list, judge) -> dict:
             goals.append({"id": goal_id(r.data["sees"], r.data["push"]), "sees": r.data["sees"], "push": r.data["push"],
                           "source": f"namer:{d.model}", "cost": r.cost})
     else:
-        nst = s1 / "arms" / "N" / "state.json"
+        nst = s1 / EXP_DIR / "N" / "state.json"
         if not nst.exists():
             sys.exit("arm N's goals are needed first: run --arm N (at least its setup)")
         goals = [tr["goals"][0] for tr in json.loads(nst.read_text())["triggers"]]
-    return {"arm": a.arm, "step": 0, "seed": a.seed, "mutants": a.mutants, "steps": a.steps, "triggers": [
-        {"id": t["id"], "index": i, "start": f"img/{t['image']}", "start_rule": t["rule"], "goals": [{**g, "from_step": 1}],
-         "parent_rule": t["rule"], "parent": f"img/{t['image']}", "history": [], "accepted": 0, "floor_rejected": 0}
+    return {"arm": a.arm, "version": EXP_DIR, "step": 0, "seed": a.seed, "mutants": a.mutants, "steps": a.steps, "triggers": [
+        {"id": t["id"], "index": i, "start": f"img/{t['image']}", "start_rule": t["rule"],
+         "goals": [{**g, "from_step": 1, "ref": f"img/{t['image']}"}],
+         "parent_rule": t["rule"], "parent": f"img/{t['image']}", "g": 0.5, "k": 0.5, "s": 0.5,
+         "history": [], "accepted": 0, "k_rejected": 0}
         for i, (t, g) in enumerate(zip(T, goals))]}
 
 
-def do_review(a, s1: Path, st: dict) -> None:
+def do_review(a, s1: Path, st: dict, judge) -> None:
     from lenia.describe import Ask
     d = _describer(a, s1)
     pid = REVIEW_R if a.arm == "NR" else REVIEW_S
@@ -353,56 +369,73 @@ def do_review(a, s1: Path, st: dict) -> None:
     asks = []
     for tr in st["triggers"]:
         g = tr["goals"][-1]
-        prog = (f"{tr['accepted']} of {REVIEW_AT} generations produced an accepted child (a mutant the cheap judge chose as "
-                f"a step toward the goal); {tr['floor_rejected']} mutants that the judge preferred as steps toward the goal "
-                "were rejected because they lost too much complexity.")
+        prog = (f"{tr['accepted']} of {REVIEW_AT} generations produced an accepted child. The judge's goal score of the "
+                f"current parent against the start world is {tr['g']:.2f} (0.5 = no change toward the goal, 1 = clearly "
+                f"further), and its complexity against the start is {tr['k']:.2f} (0.5 = as complex as the start); "
+                f"{tr['k_rejected']} mutants that moved toward the goal were rejected because they lost complexity.")
         asks.append(Ask(pid, [_pic(s1, tr["start"]), _pic(s1, tr["parent"])],
                         {"mutants": st["mutants"], "gens": REVIEW_AT, "total": st["steps"], "left": st["steps"] - REVIEW_AT,
                          "sees": g["sees"], "push": g["push"], "progress": prog}))
     ans = d.ask_many(asks, desc=f"{a.arm} review")
     if any(not r.ok for r in ans):
         sys.exit("some review calls failed (not cached); re-run to retry them")
+    rescore = []
     for tr, r in zip(st["triggers"], ans):
         dec = r.data["decision"].strip().lower()
         eff = dec if dec in allowed else "continue"
         g = tr["goals"][-1]
         new = None
-        if eff == "refine":
-            new = {"sees": g["sees"], "push": r.data["push"], "source": "refine"}
-        elif eff == "switch":
-            new = {"sees": r.data["sees"], "push": r.data["push"], "source": "switch"}
+        if eff == "refine":                   # same target, new direction: the reference stays the start; re-score
+            new = {"sees": g["sees"], "push": r.data["push"], "source": "refine", "ref": tr["start"]}
+        elif eff == "switch":                 # a new target seen in the current parent: it is the new reference
+            new = {"sees": r.data["sees"], "push": r.data["push"], "source": "switch", "ref": tr["parent"]}
+        tr["review"] = {"decision": dec, "applied": eff, "why": r.data.get("why"), "raw": r.data, "cost": r.cost,
+                        "parent": tr["parent"], "g_before": tr["g"]}
         if new:
             tr["goals"].append({**new, "id": goal_id(new["sees"], new["push"]), "from_step": REVIEW_AT + 1})
-        tr["review"] = {"decision": dec, "applied": eff, "why": r.data.get("why"), "raw": r.data, "cost": r.cost,
-                        "parent": tr["parent"]}
+            if eff == "switch":
+                tr["g"] = 0.5
+            else:
+                rescore.append(tr)
+    if rescore:                               # the parent's score under the refined goal, against the start
+        mq = []
+        for tr in rescore:
+            P, S = _pic(s1, tr["parent"]), _pic(s1, tr["start"])
+            pid = attain_prompt(tr["goals"][-1])
+            mq += [MultiQuery((pid,), P, S), MultiQuery((pid,), S, P)]
+        vs = judge.judge_multi(mq, desc=f"{a.arm} re-score refined goals")
+        if any(not all(v.ok for v in vv) for vv in vs):
+            sys.exit("some re-scoring requests failed (not cached); re-run to retry them")
+        for n, tr in enumerate(rescore):
+            tr["g"] = round(0.5 * (vs[2 * n][0].p_first + 1 - vs[2 * n + 1][0].p_first), 4)
     st["reviewed"] = True
 
 
 def same_platform(evals: "Evals", st: dict, ea) -> None:
     """Shared mutation randomness only holds if every arm draws bit-identical mutants. np.exp differs in the last bit
-    between x86 (Colab) and ARM (Mac), and NumPy may change between Colab images. If an earlier arm already simulated
-    the first trigger's step-1 mutants, this arm's must be the same rules (the same simulation-cache keys)."""
+    between x86 (Colab) and ARM (Mac), and NumPy may change between Colab images. If an earlier run already simulated
+    the first trigger's first step-1 mutants, this arm's must be the same rules (the same simulation-cache keys)."""
     if not any(evals.dir.glob("*.json")):
         return
     tr = st["triggers"][0]
     rng = np.random.default_rng([st["seed"], tr["index"], 1])
     par = Rule.from_dict(tr["start_rule"])
     keys = []
-    for _ in range(st["mutants"]):
+    for _ in range(min(8, st["mutants"])):            # every run so far drew at least 8 mutants a step
         m = mutate(par, rng, ea.mut_scale)
         m.flow = "mace"
         m.beta = float(np.clip(par.beta * np.exp(rng.normal(0, 0.1)), 0.5, 4.0))
         keys.append(evals.key(m))
     missing = [k for k in keys if not (evals.dir / f"{k}.json").exists()]
     if missing:
-        sys.exit(f"{len(missing)}/{len(keys)} of {tr['id']}'s step-1 mutants are not the ones an earlier arm drew: this machine "
-                 "computes mutations differently (another CPU type or NumPy version), so the arms would not share mutation "
-                 "randomness. Run every arm of a seed in the same environment (Colab).")
+        sys.exit(f"{len(missing)}/{len(keys)} of {tr['id']}'s first step-1 mutants are not the ones an earlier run drew: this "
+                 "machine computes mutations differently (another CPU type or NumPy version), so the arms would not share "
+                 "mutation randomness. Run every arm of a seed in the same environment (Colab).")
 
 
 def expedition(a) -> None:
     s1, run = Path(a.out), Path(a.run)
-    adir = s1 / "arms" / a.arm
+    adir = s1 / EXP_DIR / a.arm
     adir.mkdir(parents=True, exist_ok=True)
     backend.configure(a.backend)
     ea = eval_settings(run, a)
@@ -424,13 +457,13 @@ def expedition(a) -> None:
     fh = open(adir / "duels.csv", "a", newline="")
     log = csv.writer(fh)
     if fh.tell() == 0:
-        log.writerow(["step", "trigger", "mutant", "texture", "steer", "floor", "surprise", "accepted", "goal"])
+        log.writerow(["step", "trigger", "mutant", "texture", "goal", "complexity", "surprise", "accepted", "goal_id"])
     trace = open(adir / "trace.jsonl", "a")
     while st["step"] < st["steps"]:
         step = st["step"] + 1
         t0 = time.time()
         if a.arm in ("NR", "NS") and step == REVIEW_AT + 1 and not st.get("reviewed"):
-            do_review(a, s1, st)
+            do_review(a, s1, st, judge)
             QD.save_state(adir, st)
             print(f"review: {dict(Counter(tr['review']['applied'] for tr in st['triggers']))}", file=sys.stderr)
         rules, owner = [], []
@@ -445,38 +478,54 @@ def expedition(a) -> None:
                 owner.append(tr["index"])
         ev = evals.get_many(rules)
         byi = {tr["index"]: tr for tr in st["triggers"]}
-        parents = {i: _pic(s1, byi[i]["parent"]) for i in byi}
-        mq, meta = [], []
+        starts = {i: _pic(s1, byi[i]["start"]) for i in byi}
+        refs = {i: _pic(s1, byi[i]["goals"][-1]["ref"]) for i in byi}
+        mq, meta = [], []                      # meta: (trigger, child, layout); layout 1 = one request, 2 = two
         for j, (i, v) in enumerate(zip(owner, ev)):
             g = byi[i]["goals"][-1]
             if ea.max_texture > 0 and v["texture"] > ea.max_texture:
                 log.writerow([step, byi[i]["id"], j % M, round(v["texture"], 4), "", "", "", 0, g["id"]])
                 continue
-            pids = (steer_prompt(g), COMPLEXITY, SURPRISE)
-            mq += [MultiQuery(pids, v["pic"], parents[i]), MultiQuery(pids, parents[i], v["pic"])]
-            meta.append((i, j))
+            if g["ref"] == byi[i]["start"]:
+                pids = (attain_prompt(g), COMPLEXITY, SURPRISE)
+                mq += [MultiQuery(pids, v["pic"], starts[i]), MultiQuery(pids, starts[i], v["pic"])]
+                meta.append((i, j, 1))
+            else:                              # after a switch: goal against the switch point, the rest against the start
+                pg = (attain_prompt(g),)
+                mq += [MultiQuery(pg, v["pic"], refs[i]), MultiQuery(pg, refs[i], v["pic"]),
+                       MultiQuery((COMPLEXITY, SURPRISE), v["pic"], starts[i]), MultiQuery((COMPLEXITY, SURPRISE), starts[i], v["pic"])]
+                meta.append((i, j, 2))
         vs = judge.judge_multi(mq, desc=f"{a.arm} step {step}")
         if any(not all(v.ok for v in vv) for vv in vs):
             sys.exit("some judge requests failed (not cached); re-run to retry them (the step restarts)")
-        best = {}
-        for n, (i, j) in enumerate(meta):
-            x, y = vs[2 * n], vs[2 * n + 1]
-            P = [0.5 * (x[q].p_first + 1 - y[q].p_first) for q in range(3)]
-            acc = P[0] >= STEER_T and P[1] >= FLOOR_T
-            if P[0] >= STEER_T and P[1] < FLOOR_T and step <= REVIEW_AT:
-                byi[i]["floor_rejected"] += 1
-            if acc and P[0] > best.get(i, (0.0,))[0]:
-                best[i] = (P[0], j, P)
-            log.writerow([step, byi[i]["id"], j % M, round(ev[j]["texture"], 4), *[round(p, 4) for p in P], int(acc),
-                          byi[i]["goals"][-1]["id"]])
-        for i, (_, j, P) in best.items():
+        best, pos = {}, 0
+        both = lambda x, y, q: 0.5 * (x[q].p_first + 1 - y[q].p_first)
+        for i, j, lay in meta:
+            if lay == 1:
+                x, y = vs[pos], vs[pos + 1]
+                G, K, S = both(x, y, 0), both(x, y, 1), both(x, y, 2)
+                pos += 2
+            else:
+                G = both(vs[pos], vs[pos + 1], 0)
+                K, S = both(vs[pos + 2], vs[pos + 3], 0), both(vs[pos + 2], vs[pos + 3], 1)
+                pos += 4
+            tr = byi[i]
+            moves = G >= tr["g"] + MARGIN
+            acc = moves and K >= K_FLOOR
+            if moves and not acc and step <= REVIEW_AT:
+                tr["k_rejected"] += 1
+            if acc and (G, K) > best.get(i, (0.0, 0.0, None, None))[:2]:
+                best[i] = (G, K, j, S)
+            log.writerow([step, tr["id"], j % M, round(ev[j]["texture"], 4), round(G, 4), round(K, 4), round(S, 4), int(acc),
+                          tr["goals"][-1]["id"]])
+        for i, (G, K, j, S) in best.items():
             tr = byi[i]
             tr["parent_rule"], tr["parent"] = rules[j].to_dict(), ev[j]["image"]
+            tr["g"], tr["k"], tr["s"] = round(G, 4), round(K, 4), round(S, 4)
             if step <= REVIEW_AT:
                 tr["accepted"] += 1
-            h = {"step": step, "image": ev[j]["image"], "steer": round(P[0], 4), "floor": round(P[1], 4),
-                 "surprise": round(P[2], 4), "goal": tr["goals"][-1]["id"], "bodies": ev[j]["bodies"],
-                 "motion": round(ev[j]["motion"], 4)}
+            h = {"step": step, "image": ev[j]["image"], "goal_score": tr["g"], "complexity": tr["k"], "surprise": tr["s"],
+                 "goal": tr["goals"][-1]["id"], "bodies": ev[j]["bodies"], "motion": round(ev[j]["motion"], 4)}
             tr["history"].append(h)
             trace.write(json.dumps({"arm": a.arm, "trigger": tr["id"], **h, "rule": rules[j].to_dict()}) + "\n")
         st["step"] = step
@@ -495,7 +544,7 @@ def check(a) -> None:
     also attain of the new goal, end vs the parent it was set at. Gate 0c (arm L): mean attain > 0.6 and mean complexity
     >= 0.5. Writes arms/<arm>/check.json, report.md and check.png (start | end per trigger)."""
     s1 = Path(a.out)
-    adir = s1 / "arms" / a.arm
+    adir = s1 / (a.dir or EXP_DIR) / a.arm
     st = json.loads((adir / "state.json").read_text())
     if st["step"] < st["steps"]:
         sys.exit(f"arm {a.arm} has run {st['step']} of {st['steps']} steps")
@@ -508,7 +557,8 @@ def check(a) -> None:
         S, E = _pic(s1, tr["start"]), _pic(s1, tr["parent"])
         g0 = tr["goals"][0]
         for name, pid, x, y in [("attain", attain_prompt(g0), E, S), ("complexity", COMPLEXITY, E, S), ("surprise", SURPRISE, E, S)] + (
-                [("attain_new", attain_prompt(tr["goals"][-1]), E, _pic(s1, tr["review"]["parent"]))] if len(tr["goals"]) > 1 else []):
+                [("attain_new", attain_prompt(tr["goals"][-1]), E, _pic(s1, tr["goals"][-1].get("ref", tr["review"]["parent"])))]
+                if len(tr["goals"]) > 1 else []):
             qs += [Query(pid, x, y), Query(pid, y, x)]
             meta.append((tr["id"], name))
     vs = luna.judge_many(qs, desc=f"{a.arm} check (Luna)")
@@ -623,6 +673,7 @@ def main() -> None:
         e.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
     c.add_argument("--max-luna-usd", type=float, default=0.5)
     c.add_argument("--luna", default="luna", help="the held-out judge (fake for dry runs)")
+    c.add_argument("--dir", default=None, help=f"the expedition folder (default {EXP_DIR}; arms = v1)")
     a = ap.parse_args()
     {"triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check}[a.cmd](a)
 
