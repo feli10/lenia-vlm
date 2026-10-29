@@ -31,7 +31,7 @@ from lenia.prompts import get_prompt                       # noqa: E402
 from lenia import mace as M                                   # noqa: E402
 from lenia.mace import mutate, texture                        # noqa: E402
 from lenia.prompts import (INTEREST, NONE, SESSION_MATCH, STEER, SURPRISE,  # noqa: E402
-                           attain_prompt, steer_prompt)
+                           attain_prompt, steer_prompt, verify_prompt, GEN, NAMER, REVIEW)
 
 GOAL = {"id": "golden", "sees": "a round body with a dark core", "push": "make the core split in two"}
 
@@ -47,6 +47,9 @@ def compute() -> dict:
     out["prompt/steer"] = _h(get_prompt(steer_prompt(GOAL)))
     out["prompt/attain"] = _h(get_prompt(attain_prompt(GOAL)))
     out["prompt/interest"] = _h(get_prompt(INTEREST))
+    out["prompt/verify"] = _h(get_prompt(verify_prompt(GOAL["sees"])))
+    out["gen/namer"] = _h(GEN[NAMER])
+    out["gen/review"] = _h(GEN[REVIEW])
     out["menu/session_match"] = _h(SESSION_MATCH)                 # multiple-choice texts key the cache too
     out["menu/steer_groups"] = _h(STEER)
     out["menu/none"] = NONE
@@ -111,7 +114,10 @@ EXPECTED = {
     "menu/session_match": "824bc47345e20218",
     "menu/steer_groups": "54b0d7e501852ce9",
     "menu/none": "none",
-    "cache_key/multi": ["de49508527e84dd2", "3d301071e3a401d2"]   # added 2026-10-29 (judge.MultiQuery, gate 0e)
+    "cache_key/multi": ["de49508527e84dd2", "3d301071e3a401d2"],  # added 2026-10-29 (judge.MultiQuery, gate 0e)
+    "prompt/verify": "f5ccb529d327f9d9",                           # added 2026-10-29 (gate 0d)
+    "gen/namer": "f57b109cd65cea2d",                               # added 2026-10-29 (lenia.describe, gate 0a)
+    "gen/review": "b7339aa9d816035a"
 }   # recorded 2026-10-28 (cleanup); prompts, founders, mutate, simulate unchanged from before it; menus and interest added before the prompt move
 
 

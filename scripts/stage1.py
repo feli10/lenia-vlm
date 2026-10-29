@@ -132,6 +132,28 @@ def triggers(a) -> None:
     print(out / "triggers.png")
 
 
+def verify_decoys(st: dict, trigger: dict, seed: int = 0) -> dict:
+    """Gate 0d's decoys for a trigger, fixed per trigger id so every arm and the bake-off ask the same duels: a near
+    decoy (a random final-map elite of the same lineage, if any) and two random elites of other lineages. The frozen
+    verify rule (gate 0d) is "the true world beats both random decoys"; the near decoy is logged."""
+    el = [e for m in QD.islands_of(st) for _, e in sorted(m.items())]
+    rng = np.random.default_rng([seed, int(trigger["root"]), int(trigger["it"])])
+    same = [e["image"] for e in el if e.get("root") == trigger["root"]]
+    other = [e["image"] for e in el if e.get("root") != trigger["root"]]
+    return {"near": same[int(rng.integers(len(same)))] if same else None,
+            "rand": [other[int(j)] for j in rng.choice(len(other), 2, replace=False)]}
+
+
+def typical(run: Path, trigger: dict, k: int = 4, seed: int = 0) -> list:
+    """k random map elites from the snapshot nearest the trigger's iteration (the namer's "typical" contrast)."""
+    snaps = sorted(int(p.stem[len("archive_it"):]) for p in (run / "snapshots").glob("archive_it*.json"))
+    at = min(snaps, key=lambda x: abs(x - trigger["it"]))
+    el = [e["image"] for m in QD.islands_of(json.loads((run / "snapshots" / f"archive_it{at:04d}.json").read_text()))
+          for _, e in sorted(m.items())]
+    rng = np.random.default_rng([seed, int(trigger["root"]), int(trigger["it"]), 7])
+    return [el[int(j)] for j in rng.choice(len(el), k, replace=False)]
+
+
 def _font(size: int):
     try:
         return ImageFont.load_default(size=size)

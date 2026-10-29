@@ -22,3 +22,55 @@ judges:                                # judge backends (keys in .env); scripts 
     backend: fake                      # offline, for tests and dry runs
     fake_position_bias: 0.3
     fake_noise: 0.5
+
+vlms:                                  # generative VLMs (lenia.describe); scripts pick them with --models
+                                       # IDs and prices checked 2026-10-29 against third-party listings: confirm with
+                                       # `python3 scripts/bakeoff.py ping` before spending. Vertex prices are list prices
+                                       # used for logging only; billing is Google's (and comes out of the project's credits).
+  gemini-pro:
+    backend: vertex                    # project: GOOGLE_CLOUD_PROJECT in .env; location: global
+    model: gemini-4-argon              # newest Pro-class; fallback gemini-pro-3.1 below if not available on Vertex
+    usd_per_m_input: 2.0               # introductory; $4 / $20 from 2026-12-01
+    usd_per_m_output: 10.0             # thinking tokens bill as output
+    thinking: {level: low}
+    temperature: 1.0
+    max_output_tokens: 4096
+    est_cost_per_call_usd: 0.015     # measured 0.0128 per namer call (5 pictures), 10-29
+  gemini-pro-3.1:
+    backend: vertex
+    model: gemini-3.1-pro-preview
+    usd_per_m_input: 2.0
+    usd_per_m_output: 12.0
+    thinking: {level: low}
+    temperature: 1.0
+    max_output_tokens: 4096
+    est_cost_per_call_usd: 0.015     # assumed like gemini-pro
+  gemini-flash:
+    backend: vertex
+    model: gemini-3.8-flash
+    usd_per_m_input: 0.75              # introductory; $1.50 / $7.50 from 2027-01-01
+    usd_per_m_output: 3.75
+    thinking: {level: low}
+    temperature: 1.0
+    max_output_tokens: 4096
+    est_cost_per_call_usd: 0.006     # measured 0.0048 per namer call, 10-29
+  qwen-8b:
+    backend: openrouter                # cost comes from OpenRouter's usage report
+    model: qwen/qwen3-vl-8b-instruct
+    temperature: 0.7
+    max_output_tokens: 1024
+    est_cost_per_call_usd: 0.001     # measured 0.0006
+  qwen-235b:
+    backend: openrouter
+    model: qwen/qwen3-vl-235b-a22b-instruct
+    temperature: 0.7
+    max_output_tokens: 1024
+    est_cost_per_call_usd: 0.001     # measured 0.0006
+  gemma-31b:
+    backend: openrouter
+    model: google/gemma-4-31b-it
+    temperature: 0.7
+    max_output_tokens: 1024
+    est_cost_per_call_usd: 0.0005     # measured 0.0002
+  fake:
+    backend: fake

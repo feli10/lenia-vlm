@@ -261,3 +261,110 @@ def rate_labels(a) -> None:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+NAMES_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Rate names</title>
+<style>
+ body{font-family:system-ui,sans-serif;margin:0;background:#f4f4f2;color:#222}
+ header{padding:12px 20px;display:flex;justify-content:space-between;align-items:baseline}
+ h1{font-size:17px;margin:0} #prog{color:#666}
+ main{display:flex;gap:22px;padding:4px 20px 20px;align-items:flex-start}
+ img{width:min(56vw,640px);border-radius:6px;background:#000}
+ .side{max-width:520px} .txt{background:#fff;border-radius:8px;padding:12px 14px;margin-bottom:14px;line-height:1.4}
+ .lab{font-size:12px;color:#777;text-transform:uppercase;letter-spacing:.04em}
+ .q{margin:14px 0 6px;font-weight:600} button{font-size:15px;padding:7px 14px;margin:0 6px 6px 0;border-radius:6px;
+ border:1px solid #bbb;background:#fff;cursor:pointer} button.on{background:#333;color:#fff;border-color:#333}
+ textarea{width:100%;height:46px;margin-top:8px} #next{margin-top:12px;background:#2d6a4f;color:#fff;border-color:#2d6a4f}
+ .hint{color:#777;font-size:13px}
+</style></head><body>
+<header><h1>Is the description right, and is it what is notable?</h1><span id="prog"></span></header>
+<main><img id="im"><div class="side">
+ <div class="txt"><div class="lab">sees</div><div id="sees"></div></div>
+ <div class="txt"><div class="lab">push</div><div id="push"></div></div>
+ <div class="hint">One whole world, four snapshots in reading order. Judge the "sees" text; the push is for context.</div>
+ <div class="q">Is "sees" right about this world?</div>
+ <div data-k="right"><button>yes</button><button>partly</button><button>no</button></div>
+ <div class="q">Is it what is notable about this world (not a minor or generic detail)?</div>
+ <div data-k="notable"><button>yes</button><button>no</button></div>
+ <textarea id="note" placeholder="note (optional)"></textarea>
+ <button id="next">next</button></div></main>
+<script>
+let todo=[],cur=null,ans={};
+document.querySelectorAll('[data-k]').forEach(g=>g.querySelectorAll('button').forEach(b=>b.onclick=()=>{
+  g.querySelectorAll('button').forEach(x=>x.classList.remove('on'));b.classList.add('on');ans[g.dataset.k]=b.textContent;}));
+async function load(){todo=await (await fetch('/todo')).json();show();}
+function show(){document.getElementById('prog').textContent=todo.length+' left';
+  if(!todo.length){document.querySelector('main').innerHTML='<p style="padding:20px">All done. You can close this tab.</p>';return;}
+  cur=todo[0];ans={};document.querySelectorAll('button.on').forEach(x=>x.classList.remove('on'));
+  document.getElementById('im').src='/img/'+cur.image;document.getElementById('sees').textContent=cur.sees;
+  document.getElementById('push').textContent=cur.push;document.getElementById('note').value='';}
+document.getElementById('next').onclick=async()=>{if(!ans.right||!ans.notable){alert('answer both questions');return;}
+  await fetch('/answer',{method:'POST',body:JSON.stringify({id:cur.id,right:ans.right,notable:ans.notable,
+  note:document.getElementById('note').value})});todo.shift();show();};
+load();
+</script></body></html>"""
+
+
+def name_answers(out) -> dict:
+    p = Path(out) / "ratings.csv"
+    if not p.exists():
+        return {}
+    return {int(r["id"]): r for r in csv.DictReader(open(p))}
+
+
+def rate_names(out, port: int = 8771, open_browser: bool = True) -> None:
+    """One (world, description) at a time: is `sees` right (yes / partly / no), is it notable (yes / no), note ->
+    <out>/ratings.csv. <out>/tasks.json: [{id, image, sees, push, ...}] (other fields, e.g. the model, are never sent
+    to the page); images in <out>/images/. Progress is kept: answered ids are skipped."""
+    import webbrowser
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    out = Path(out)
+    tasks = [{k: t[k] for k in ("id", "image", "sees", "push")} for t in json.loads((out / "tasks.json").read_text())]
+    lock = threading.Lock()
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *x):
+            pass
+
+        def _send(self, code, body, ctype):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/":
+                return self._send(200, NAMES_PAGE.encode(), "text/html; charset=utf-8")
+            if self.path == "/todo":
+                done = name_answers(out)
+                return self._send(200, json.dumps([t for t in tasks if t["id"] not in done]).encode(), "application/json")
+            if self.path.startswith("/img/"):
+                f = out / "images" / Path(self.path).name
+                if f.exists():
+                    return self._send(200, f.read_bytes(), "image/png")
+            self._send(404, b"not found", "text/plain")
+
+        def do_POST(self):
+            x = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            with lock:
+                p = out / "ratings.csv"
+                new = not p.exists()
+                with open(p, "a", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=["time", "id", "right", "notable", "note"])
+                    if new:
+                        w.writeheader()
+                    w.writerow({"time": round(time.time(), 1), "id": x["id"], "right": x["right"], "notable": x["notable"],
+                                "note": x.get("note", "")})
+            self._send(200, b"ok", "text/plain")
+
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    print(f"rating page: {url} ({len(tasks) - len(name_answers(out))} of {len(tasks)} left; answers go to "
+          f"{out / 'ratings.csv'}; Ctrl-C to stop, progress is kept)")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
