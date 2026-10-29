@@ -13,8 +13,8 @@ Setup
   (Jev over-picks "cog") and leaps (not verifiable) are not used for steering.
 - Per elite, --goal-branches branches each get a goal: an observation sampled with probability proportional to
   Jev's match probability (no two branches of an elite share an observation), with one of its directions.
-  --free-branches more branches use the generic complexity prompt of mace_evo.py.
-- Each generation every branch makes --mutants mutants (mace_evo's mutation), the grid-noise rule discards some,
+  --free-branches more branches use the generic complexity prompt (lenia.mace).
+- Each generation every branch makes --mutants mutants (lenia.mace.mutate), the grid-noise rule discards some,
   and each survivor duels the branch's current parent (Jev, both orders) under the branch's prompt; the best with
   P >= --threshold becomes the parent. Goal prompt: the observation, the direction, "which world would you choose
   as the parent, to move toward this goal?". Every --phase generations a goal branch is re-matched on its current
@@ -51,11 +51,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-import mace_evo as ME
+from lenia import mace as ME
 import mace_qd as QD
 from lenia import backend
 from lenia.config import REPO_ROOT, load
-from lenia.explore import mutate
+from lenia.mace import mutate
 from lenia.judge import ChoiceQuery, Judge, Query, load_env
 from lenia.prompts import PROMPTS
 from lenia.sim import Rule

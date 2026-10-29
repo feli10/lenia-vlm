@@ -1,7 +1,7 @@
 [project]
 name = "lenia-vlm"
 version = "0.1.0"
-description = "Lenia creatures under a hard 'alive' constraint, with VLM aesthetic preferences on top"
+description = "Open-ended evolution of MaCE-Lenia worlds steered by a cheap decision model and a rare generative VLM"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.26",
@@ -12,9 +12,6 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = ["torch>=2.2"]                   # `uv sync --extra gpu`; preinstalled on Colab
-
-[project.scripts]
-lenia = "lenia.cli:entry"
 
 [dependency-groups]
 dev = ["pytest>=8"]

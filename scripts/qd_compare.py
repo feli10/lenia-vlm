@@ -5,7 +5,7 @@ Both final archives are pooled. Every elite meets --opponents random elites of t
 itself), both orders, under
   - the surprise prompt (surprise_check.py; validated against Felix's ratings) with Luna (held out: Luna never
     drove either run) and with Jev (the driver of qd3's parent selection, so partly circular for qd3), and
-  - the complexity prompt (mace_evo; the entry duel of both runs) with Luna, as a quality check.
+  - the complexity prompt (lenia.mace; the entry duel of both runs) with Luna, as a quality check.
 A score is the mean win probability, so both archives are measured against the same reference. Reported: mean
 score per archive, AUC (probability a random qd3 elite outscores a random qd2 elite; 0.5 = no difference) with a
 permutation p-value, and the share of each archive among the pool's top 20. Elites of one lineage are not
@@ -39,7 +39,7 @@ from PIL import Image
 import mace_qd as QD
 from lenia.config import REPO_ROOT, load
 from lenia.judge import Judge, Query, load_env
-from mace_evo import PROMPT_ID as COMPLEXITY
+from lenia.mace import PROMPT_ID as COMPLEXITY
 from surprise_check import SURPRISE, _answers, auc, fisher_greater
 
 N_RATE, TOP = 12, 20

@@ -9,7 +9,7 @@
   python scripts/mace_qd.py run   --out /tmp/qd-dry --judge fake --embed-model fake --iterations 3 --batch 8 \\
       --init 8 --size 96 --warmup 200 --render 120 --gap 40             # offline dry run
 
-Why MAP-Elites (project doc "MaCE-Lenia Jev-guided evolution results"): the hill climber (mace_evo.py)
+Why MAP-Elites (project doc "MaCE-Lenia Jev-guided evolution results"): the hill climber (mace_evo.py, now in archive/)
 duels each mutant only against its own parent and, after ~60 generations, moved sideways. Here a candidate
 must beat the elite already holding its niche. v1 fixed that treadmill (held-out Luna preferred later elites
 33/43) but one seed's lineage colonised all 56 cells: bodies x motion can be traversed by a single body
@@ -32,8 +32,8 @@ inherited, so elite and challenger are always the same age.
 - Insertion: a candidate takes an empty cell; for an occupied cell it duels the elite (Jev, both orders,
   P = mean) and replaces it at P >= --threshold. Several candidates for one cell in one iteration: the first
   takes an empty cell, the others duel it; the highest P >= threshold wins.
-- Variation: kernel mutation at --mut-scale plus beta x exp(N(0, 0.1)) in [0.5, 4], as in mace_evo.
-- Seeds: the 12 mace_evo founders plus --init more draws of the same sampler. Every elite records the seed
+- Variation: kernel mutation at --mut-scale plus beta x exp(N(0, 0.1)) in [0.5, 4], as in the hill climber (lenia.mace.mutate).
+- Seeds: the 12 founders (lenia.mace.founders) plus --init more draws of the same sampler. Every elite records the seed
   it descends from ("root").
 - Parent selection (--parent-select): "uniform" (v1, v2) picks parents uniformly from the island's elites.
   "surprise" (v3) scores every elite with Jev's surprise duel (surprise_check.py, validated against Felix's
@@ -72,11 +72,11 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
-import mace_evo as ME
+from lenia import mace as ME
 from lenia import backend, render, seeds
 from lenia.alive import bodies as label_bodies
 from lenia.config import REPO_ROOT, load
-from lenia.explore import mutate, texture
+from lenia.mace import mutate, texture
 from lenia.judge import Judge, Query, load_env
 from lenia.sample import sample
 from lenia.sim import Rule, with_flow
@@ -156,7 +156,7 @@ _EMB = {}
 
 def embedder(name: str):
     if name not in _EMB:
-        from lenia.distill import Embedder
+        from lenia.embed import Embedder
         _EMB[name] = Embedder(name)
     return _EMB[name]
 
@@ -648,10 +648,10 @@ def check(a) -> None:
 
 
 def rate(a) -> None:
-    from lenia import vlmtest
+    from lenia import rating
     cdir = Path(a.out) / "check"
     n = len(json.loads((cdir / "pairs.json").read_text()))
-    vlmtest.rate(cdir, n=n, source="pairs.json",
+    rating.rate(cdir, n=n, source="pairs.json",
                  question="Which world would you choose as the parent, to evolve toward more complex, life-like structure?",
                  description="Each image is one whole world at four times, far enough apart to show movement, in reading order.")
 

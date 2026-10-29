@@ -35,7 +35,7 @@ v2 (`duel`), after the library-misfit / DINOv2 signals failed (they flagged worl
 interesting ones): ask the judges directly, in the pairwise form that has worked best. Each of the 30 rated worlds
 meets the same 6 random reference worlds, both orders, under two prompts: "surprise" (which world shows something
 more unusual *and* interesting, a distinct feature or behaviour rather than more or less of the same?) and, as a
-baseline, the generic complexity prompt of mace_evo. A world's score is its mean win probability. Measured
+baseline, the generic complexity prompt (lenia.mace). A world's score is its mean win probability. Measured
 against Felix's ratings as AUC (unusual vs typical; 0.5 = chance) with a one-sided permutation p-value.
 
 v3 (`validate`): the v2 prompt was written after v1 failed, on the same 30 worlds, so it is checked on fresh ones.
@@ -120,7 +120,7 @@ def embed(paths: list, model: str) -> np.ndarray:
     for p in paths:
         im = Image.open(p).convert("RGB")
         w, h = im.size
-        tw, th = (w - 4) // 2, (h - 4) // 2                       # mace_evo.picture: 2x2 tiles with a 4 px gap
+        tw, th = (w - 4) // 2, (h - 4) // 2                       # lenia.mace.picture: 2x2 tiles with a 4 px gap
         tiles += [im.crop((x, y, x + tw, y + th)) for y in (0, h - th) for x in (0, w - tw)]
     E = np.asarray(emb(tiles), np.float64).reshape(len(paths), 4, -1).mean(1)
     return E / np.linalg.norm(E, axis=1, keepdims=True)
@@ -341,7 +341,7 @@ def duel(a) -> None:
     cache = {}
     cfg = load(a.config)
     load_env(REPO_ROOT / ".env")
-    from mace_evo import PROMPT_ID as COMPLEXITY
+    from lenia.mace import PROMPT_ID as COMPLEXITY
     res = {}
     for jn in a.judges.split(","):
         judge = Judge(jn, {**cfg["judges"]["defaults"], **cfg["judges"][jn]}, out / "duel_cache.sqlite", yes=True)
