@@ -59,6 +59,12 @@ phase-1 goal, how many generations produced an accepted child) and answers conti
   interest (gen 10 vs start) for reference only.
 
   PYTHONPATH=src:scripts python3 scripts/gates.py 0b --out runs/gate-0b                         # Mac, ~$0.2 (Gemini Pro)
+  PYTHONPATH=src:scripts python3 scripts/gates.py 0b --prompt refine --out runs/gate-0b-refine   # N+R's prompt
+  PYTHONPATH=src:scripts python3 scripts/gates.py 0b --prompt switch --out runs/gate-0b-switch   # N+S's prompt
+Result (review_v1, runs/gate-0b): refine tracked lack of progress (AUC 0.73, p = 0.02; the accepted count alone 0.34), but
+about half the "refines" switched to a new feature, so refine and switch became separate prompts (REVIEW_R, REVIEW_S).
+For switch, also reported: switches on branches that were making progress (Luna progress >= 0.6), the over-switching
+failure Felix flagged.
   PYTHONPATH=src:scripts python3 scripts/gates.py 0b --out /tmp/g0b --model fake               # offline
 """
 from __future__ import annotations
@@ -301,7 +307,8 @@ def report_d(a) -> None:
 
 def g0b(a) -> None:
     from lenia.describe import Ask, Describer
-    from lenia.prompts import REVIEW
+    from lenia.prompts import REVIEW, REVIEW_R, REVIEW_S
+    pid = {"v1": REVIEW, "refine": REVIEW_R, "switch": REVIEW_S}[a.prompt]
     out, gs = Path(a.out), Path(a.goal_session)
     out.mkdir(parents=True, exist_ok=True)
     st = json.loads((gs / "state.json").read_text())
@@ -324,16 +331,19 @@ def g0b(a) -> None:
                     "the goal); in the others no mutant was good enough and the parent stayed the same.")
         items.append({"branch": b["name"], "accepted": k, "sees": g["sees"], "push": g["push"], "start": H[0]["image"],
                       "current": cur["image"], "luna_progress": pp, "luna_interest_end": ip})
-        asks.append(Ask(REVIEW, [pic(H[0]["image"]), pic(cur["image"])],
-                        {"mutants": mut, "gens": ph, "total": total, "sees": g["sees"], "push": g["push"], "progress": prog_txt}))
+        fill = {"mutants": mut, "gens": ph, "total": total, "sees": g["sees"], "push": g["push"], "progress": prog_txt}
+        if pid != REVIEW:
+            fill["left"] = total - ph
+        asks.append(Ask(pid, [pic(H[0]["image"]), pic(cur["image"])], fill))
     cfg = load(a.config)
     load_env(REPO_ROOT / ".env")
     d = Describer(a.model, cfg["vlms"][a.model], out / "describe_cache.sqlite", max_usd=a.max_vlm_usd)
     ans = d.ask_many(asks, desc="0b review")
     for x, r in zip(items, ans):
         x.update({"ok": r.ok, "decision": (r.data or {}).get("decision", "").strip().lower(),
-                  "new_push": (r.data or {}).get("push"), "why": (r.data or {}).get("why"), "cost": r.cost, "usage": r.usage})
-    (out / "results.json").write_text(json.dumps({"model": d.model, "items": items}, indent=1))
+                  "new_push": (r.data or {}).get("push"), "new_sees": (r.data or {}).get("sees"), "why": (r.data or {}).get("why"),
+                  "cost": r.cost, "usage": r.usage})
+    (out / "results.json").write_text(json.dumps({"model": d.model, "prompt": pid, "items": items}, indent=1))
     print(f"VLM spent ${d.spent:.4f} (cache total ${d.cache.total_cost():.4f})", file=sys.stderr)
     report_b(a)
 
@@ -342,29 +352,40 @@ def report_b(a) -> None:
     out = Path(a.out)
     R = json.loads((out / "results.json").read_text())
     X = R["items"]
-    ok = [x for x in X if x["ok"] and x["decision"] in ("continue", "refine")]
-    ref = np.array([x["decision"] == "refine" for x in ok], int)
+    menu = ("continue", "refine", "switch")
+    ok = [x for x in X if x["ok"] and x["decision"] in menu]
+    dec = np.array([x["decision"] for x in ok])
     pg = np.array([x["luna_progress"] for x in ok])
     it = np.array([x["luna_interest_end"] for x in ok])
     k = np.array([x["accepted"] for x in ok])
-    L = [f"# Gate 0b (cut down): the review prompt on 30 pilot branches at generation 5 ({R['model']})\n",
-         f"{len(ok)}/{len(X)} valid answers; refine {ref.sum()}, continue {len(ref) - ref.sum()}. Luna progress = P(the "
-         "gen-5 parent beats its start on the branch's goal), both orders; Luna interest = P(gen 10 beats the start).\n"]
-    if 0 < ref.sum() < len(ref):
-        A1, p1 = auc(list(-pg), list(ref), n_perm=5000)
+    change = (dec != "continue").astype(int)
+    L = [f"# Gate 0b (cut down): review prompt {R.get('prompt', 'review_v1')} on 30 pilot branches at generation 5 "
+         f"({R['model']})\n",
+         f"{len(ok)}/{len(X)} valid answers; " + ", ".join(f"{m} {int((dec == m).sum())}" for m in menu if (dec == m).any()) +
+         ". Luna progress = P(the gen-5 parent beats its start on the branch's goal), both orders.\n"]
+    for m in menu:
+        if (dec == m).any():
+            L.append(f"- {m}: mean Luna progress {pg[dec == m].mean():.2f} (n = {int((dec == m).sum())})")
+    if 0 < change.sum() < len(change):
+        A1, p1 = auc(list(-pg), list(change), n_perm=5000)
         A2, p2 = auc(list(-k.astype(float)), list(pg < 0.5), n_perm=5000)
-        A3, p3 = auc(list(-it), list(ref), n_perm=5000)
-        L += [f"- mean Luna progress: refine {pg[ref == 1].mean():.2f}, continue {pg[ref == 0].mean():.2f}; "
-              f"AUC (lower progress -> refine) {A1:.2f}, p = {p1:.3f}",
+        A3, p3 = auc(list(-it), list(change), n_perm=5000)
+        L += [f"- any change (refine or switch) vs lower progress: AUC {A1:.2f}, p = {p1:.3f}",
               f"- baseline, accepted count alone: AUC (fewer accepted -> progress < 0.5) {A2:.2f}, p = {p2:.3f}",
-              f"- refine rate by accepted count: " + ", ".join(f"{j}: {ref[k == j].sum()}/{(k == j).sum()}" for j in sorted(set(k))),
-              f"- for reference, later interest: refine {it[ref == 1].mean():.2f}, continue {it[ref == 0].mean():.2f}; "
-              f"AUC {A3:.2f}, p = {p3:.3f} (confounded: the pilot re-matched every branch at gen 5)"]
-    L += ["", "| branch | accepted | Luna progress | decision | old push -> new push | why |", "|---|---|---|---|---|---|"]
+              f"- for reference, later interest vs change: AUC {A3:.2f}, p = {p3:.3f} (confounded by the pilot's re-match)"]
+    hi = pg >= 0.6
+    if hi.any():
+        L.append(f"- branches making progress (Luna >= 0.6, n = {int(hi.sum())}): " +
+                 ", ".join(f"{m} {int(((dec == m) & hi).sum())}" for m in menu if ((dec == m) & hi).any()))
+    L += ["", "| branch | accepted | Luna progress | decision | change | why |", "|---|---|---|---|---|---|"]
     for x in X:
-        np_ = x["new_push"] if x["decision"] == "refine" else ""
-        L.append(f"| {x['branch']} | {x['accepted']} | {x['luna_progress']:.2f} | {x['decision'] or 'FAILED'} | "
-                 f"{x['push']}{(' -> ' + np_) if np_ else ''} | {x['why'] or ''} |")
+        d = x["decision"] or "FAILED"
+        ch = ""
+        if d == "refine":
+            ch = f"{x['push']} -> {x['new_push']}"
+        elif d == "switch":
+            ch = f"was: {x['push']} / now sees: {x['new_sees']} -> {x['new_push']}"
+        L.append(f"| {x['branch']} | {x['accepted']} | {x['luna_progress']:.2f} | {d} | {ch} | {x['why'] or ''} |")
     (out / "report.md").write_text("\n".join(L) + "\n")
     print("\n".join(L))
 
@@ -397,6 +418,7 @@ def main() -> None:
     b.add_argument("--out", default="runs/gate-0b")
     b.add_argument("--goal-session", default="runs/goal-session")
     b.add_argument("--model", default="gemini-pro")
+    b.add_argument("--prompt", default="v1", choices=["v1", "refine", "switch"], help="review_v1 | REVIEW_R | REVIEW_S")
     b.add_argument("--config", default=None)
     b.add_argument("--max-vlm-usd", type=float, default=0.5)
     br = sub.add_parser("0b-report")

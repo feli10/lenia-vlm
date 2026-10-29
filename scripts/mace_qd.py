@@ -245,7 +245,10 @@ def insert(st: dict, k: int, cands: list, evals: list, judge, out: Path, it: int
     def place(ck, n, p):
         rule, parent, root = cands[n]
         e = evals[n]
-        name = f"it{it:04d}_{tag}{n:03d}.png"
+        # migrants get their own names: a migrant and the island's mutant n of the same iteration used to share
+        # it{it}_I{k}_{n}.png, and the existence check below gave one of them the other's picture (fixed 2026-10-29)
+        mig = "m" if str(parent or "").startswith("migrant") else ""
+        name = f"it{it:04d}_{tag}{mig}{n:03d}.png"
         if not (imgdir / name).exists():
             Image.fromarray(e["pic"]).save(imgdir / name)
         prev = arch.get(ck)

@@ -6,10 +6,7 @@ everything frequent: entry duels, surprise detection, steering. A **generative V
 decisions: naming what is new and reviewing where an expedition is heading. **Luna** (OpenAI Decisions via
 OpenRouter) and blind human ratings are held-out judges and never drive search.
 
-**Status (2026-10-28):** the base search (MAP-Elites with islands and a surprise archive) and the surprise
-detector are validated. The next experiment, the stage-1 core test of the escalation loop, is planned, not yet
-built. Plans and results live in the claude.ai project "Research At NYU Game Innovation Lab" (start with
-"VLM in the loop - escalation plan (core first)"), not in this repo.
+**Status (2026-10-29):** the base search (MAP-Elites with islands and a surprise archive) and the surprise detector are validated. Stage 1 of the escalation loop is being built: triggers, gates 0e/0d/0a/0b and the expedition code are done; the arms run next. Plans and results live in the claude.ai project "Research At NYU Game Innovation Lab" (start with "VLM in the loop - escalation plan (core first)" and "Stage 0 gates - results"), not in this repo.
 
 ## Setup
 
@@ -39,7 +36,7 @@ rsynced to `runs/` (git-ignored) for analysis on the Mac.
 | `scripts/mace_qd.py` | MAP-Elites base search (islands, form axis, surprise archive `--sarch`) |
 | `scripts/goal_session.py` | goal-steered sessions with library v3 goals (`data/goal_library_v3.json`), the expedition machinery |
 | `scripts/qd_compare.py` | compare archives with held-out Luna, then your blind "unusual?" ratings (`rate`) |
-| `scripts/stage1.py` | Stage 1 of the escalation loop: `triggers` (re-score the surprise archive, best per lineage), shared helpers (typical worlds, verify decoys) |
+| `scripts/stage1.py` | Stage 1 of the escalation loop: `triggers` (re-score the surprise archive, best per lineage), `expedition --arm L/N/NR/NS` (guarded expeditions, simulation cache, one review for NR/NS), `check` (held-out Luna, end vs start; gate 0c) |
 | `scripts/gates.py` | Stage 0 gates: 0e (several questions per request), 0d (verify) |
 | `scripts/bakeoff.py` | gate 0a: which VLM names the triggers (`ping`, `names`, `verify`, `rate`, `report`) |
 | `scripts/res_check.py` | gate 0f: Jev on smaller pictures (done; keep for reference) |

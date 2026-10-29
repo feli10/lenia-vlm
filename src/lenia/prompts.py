@@ -161,6 +161,41 @@ GEN.setdefault(REVIEW, {
     "fields": ["decision", "push", "why"]})
 
 
+# Stage 1 review prompts (10-29, after gate 0b): review_v1 let "refine" drift into switching to a new feature about half
+# the time. Refine and switch are now separate options, so arms differ by one component:
+#   N+R: continue / refine (REVIEW_R);  N+S: continue / refine / switch (REVIEW_S). One review per expedition in Stage 1.
+_REVIEW_HEAD = ("We are steering the descendants of a world toward a goal, one generation at a time. Each generation, "
+                "{mutants} mutants of the current parent are made, and the cheap judge accepts the one that best moves "
+                "toward the goal, if any. " + _FRAMES + "\n\nImage 1 is the world the expedition started from. Image 2 is "
+                "the current parent, after {gens} of {total} generations.\nThe world it started from showed this: {sees}\n"
+                "The goal: {push}\nSo far: {progress}\n\nDecide for the remaining {left} generations (the goal will not be "
+                "reviewed again):\n"
+                "- \"continue\": keep the goal as it is.\n"
+                "- \"refine\": keep the same target, the feature the start showed, and rewrite the goal's direction so the "
+                "judge can make progress on it. Do not change to a different feature, even one that has appeared since.\n")
+_PUSH_SPEC = "an instruction starting with \"make\", at most 20 words"
+
+REVIEW_R = "review_refine_v2"
+GEN.setdefault(REVIEW_R, {
+    "system": GEN[REVIEW]["system"],
+    "user": (_REVIEW_HEAD + "Return {\"decision\": \"continue\" or \"refine\", \"push\": the goal for the remaining "
+             f"generations (the same text if you continue; {_PUSH_SPEC}), \"why\": one short sentence}}."),
+    "fields": ["decision", "push", "why"]})
+
+REVIEW_S = "review_switch_v1"
+GEN.setdefault(REVIEW_S, {
+    "system": GEN[REVIEW]["system"],
+    "user": (_REVIEW_HEAD + "- \"switch\": drop the target and pursue a different feature that has appeared in the "
+             "current parent. Reaching anything takes commitment: switching throws away the progress made on the current "
+             "goal, and only the remaining generations are left for the new one. Switch only if the new feature is clearly "
+             "more promising than the current goal and can be developed within them.\n"
+             "Return {\"decision\": \"continue\", \"refine\" or \"switch\", \"sees\": what the rest of the expedition "
+             "builds on (the start's description unchanged, unless you switch; if you switch, the new feature in Image 2: "
+             "one concrete, visible feature, at most 25 words), \"push\": the goal for the remaining generations (the same "
+             f"text if you continue; {_PUSH_SPEC}), \"why\": one short sentence}}."),
+    "fields": ["decision", "sees", "push", "why"]})
+
+
 # ---------- lookup ----------
 
 def get_prompt(prompt_id: str) -> dict[str, str]:
