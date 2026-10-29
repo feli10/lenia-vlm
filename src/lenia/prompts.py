@@ -1,117 +1,105 @@
-"""Pairwise prompts for judging Lenia creatures.
+"""Every judge prompt of the live pipeline, in one place.
 
-{A} and {B} name the two images: "the first image" / "the second image" for the OpenRouter
-Decisions API, and the state keys `first` / `second` for Jev. The ids are stable and the full text
-goes into the judge cache key, so editing a prompt invalidates its cached answers.
+Pairwise duels: {A} and {B} name the two images ("the first image" / "the second image" for the OpenRouter
+Decisions API, the state keys `first` / `second` for Jev). Multiple choice: {W} names the image, {ABOUT} the
+aspect asked about. Ids are stable and the full text goes into the judge cache key, so editing a prompt
+invalidates its cached answers; tests/test_golden.py fails on any change to these texts.
+
+The four "You are shown ... worlds from a mass-conserving variant of Lenia" preambles differ slightly in wording.
+That is historical, and kept on purpose: unifying them would change the text and so every cache key.
+
+Gathered here verbatim on 2026-10-28 from lenia/mace.py (complexity), scripts/surprise_check.py (surprise),
+scripts/goal_session.py (interest, steer, attain, session menus).
+The library-v3 menus of the goal-matching experiment are in archive/scripts/goal_groups.py.
+The classic-Lenia creature prompts (appeal, curate, dual views, radical arm) are in archive/src_lenia/prompts_classic.py.
 """
 from __future__ import annotations
 
-CONTEXT = ("You are shown two creatures from Lenia, a continuous cellular automaton used in artificial-life "
-           "research. Each image shows one creature as four snapshots taken a few moments apart, in reading "
-           "order (top-left, top-right, bottom-left, bottom-right). The two images are {A} and {B}. ")
+PROMPTS: dict[str, dict[str, str]] = {}
 
-CONTEXT_DUAL = ("You are shown two creatures from Lenia, a continuous cellular automaton used in artificial-life "
-                "research. Each image shows one creature in two views, both drawn at the same scale for every "
-                "creature. Left: a wide view of the creature's recent movement, with its positions over the last "
-                "16 time units overlaid as multiple exposures (fainter copies are earlier, the brightest is the "
-                "latest), so you can see how far, how fast and along what path it moves; a creature that stays in "
-                "place shows a single shape. Right: four close-ups of the creature, centred on it, 2 time units "
-                "apart in reading order (top-left, top-right, bottom-left, bottom-right), showing its shape and "
-                "how it changes. The two images are {A} and {B}. ")
 
-CONTEXT_DUAL_BODY = ("You are shown two creatures from Lenia, a continuous cellular automaton used in artificial-life "
-                     "research. Each image shows one creature in two views, each drawn relative to the creature's own "
-                     "size, so the images do not show how big the creatures are compared with each other. Left: the "
-                     "creature's recent movement, in a window four body lengths wide, with its positions over the last "
-                     "16 time units overlaid as multiple exposures (fainter copies are earlier, the brightest is the "
-                     "latest), so you can see how many body lengths it travels and along what path; a creature that "
-                     "stays in place shows a single shape. Right: four close-ups filling the frame, 2 time units apart in "
-                     "reading order (top-left, top-right, bottom-left, bottom-right), showing its shape and how it "
-                     "changes. The two images are {A} and {B}. ")
+# ---------- pairwise duels ----------
 
-PROMPTS: dict[str, dict[str, str]] = {
-    "appeal": {
-        "instructions": CONTEXT + "Which creature is more visually appealing?",
-        "first": "The creature in {A} is more visually appealing.",
-        "second": "The creature in {B} is more visually appealing.",
-    },
-    "lifelike": {
-        "instructions": CONTEXT + "Which creature looks more like a living organism?",
-        "first": "The creature in {A} looks more like a living organism.",
-        "second": "The creature in {B} looks more like a living organism.",
-    },
-    "appeal_bare": {                   # the same question with no Lenia / artificial-life framing
-        "instructions": "You are shown two images: {A} and {B}. Which image is more visually appealing?",
-        "first": "{A} is more visually appealing.",
-        "second": "{B} is more visually appealing.",
-    },
-    "beautiful": {
-        "instructions": CONTEXT + "Which creature is more beautiful?",
-        "first": "The creature in {A} is more beautiful.",
-        "second": "The creature in {B} is more beautiful.",
-    },
-    "curate": {                        # expert-curator framing: Chan's catalogue is itself a curated collection
-        "instructions": CONTEXT + "You are curating a gallery of the most remarkable creatures discovered in Lenia. "
-                                  "Which creature would you rather include?",
-        "first": "I would rather include the creature in {A}.",
-        "second": "I would rather include the creature in {B}.",
-    },
-    "curate_dual": {                   # `curate` for the two-view images (pool --camera dual)
-        "instructions": CONTEXT_DUAL + "You are curating a gallery of the most remarkable creatures discovered in Lenia. "
-                                       "Which creature would you rather include?",
-        "first": "I would rather include the creature in {A}.",
-        "second": "I would rather include the creature in {B}.",
-    },
-    "curate_dual_body": {              # `curate` for the size-removed two-view images (pool --camera dual_body)
-        "instructions": CONTEXT_DUAL_BODY + "You are curating a gallery of the most remarkable creatures discovered in "
-                                            "Lenia. Which creature would you rather include?",
-        "first": "I would rather include the creature in {A}.",
-        "second": "I would rather include the creature in {B}.",
-    },
-    # prompt arm (RQ3) on the two-view images: does the wording move the teacher off "bigger wins"?
-    "curate_dual_nuanced": {
-        "instructions": CONTEXT_DUAL + "You are curating a gallery of the most remarkable creatures discovered in Lenia. "
-                                       "Judge each creature by its form, internal structure and behaviour, not by how "
-                                       "large it appears. Which creature would you rather include?",
-        "first": "I would rather include the creature in {A}.",
-        "second": "I would rather include the creature in {B}.",
-    },
-    "lifelike_dual": {
-        "instructions": CONTEXT_DUAL + "Which creature behaves more like a living organism?",
-        "first": "The creature in {A} behaves more like a living organism.",
-        "second": "The creature in {B} behaves more like a living organism.",
-    },
-    "elegant_dual": {
-        "instructions": CONTEXT_DUAL + "Which creature is more elegant?",
-        "first": "The creature in {A} is more elegant.",
-        "second": "The creature in {B} is more elegant.",
-    },
-    "interesting": {
-        "instructions": CONTEXT + "Which creature is more interesting to look at?",
-        "first": "The creature in {A} is more interesting to look at.",
-        "second": "The creature in {B} is more interesting to look at.",
-    },
-}
+# Map entry (complexity duel vs the cell's incumbent) and the expedition floor.
+COMPLEXITY = "evolve_complexity_world"
+PROMPTS.setdefault(COMPLEXITY, {
+    "instructions": ("You are shown two worlds from a mass-conserving variant of Lenia, a continuous cellular automaton "
+                     "used in artificial-life research. Each image shows one whole world as four snapshots taken a few "
+                     "time apart, long enough to show movement and change, in reading order (top-left, top-right, "
+                     "bottom-left, bottom-right); the colours are "
+                     "three interacting chemical channels. The two images are {A} and {B}. We are running an "
+                     "evolutionary process whose goal is to reach more complex, life-like structure over many "
+                     "generations. Which world would you choose as the parent for the next generation?"),
+    "first": "I would choose the world in {A} as the parent.",
+    "second": "I would choose the world in {B} as the parent.",
+})
 
-# Radical prompt arm (2026-10-22), all on the two-view images with the CONTEXT_DUAL framing. Does Luna have
-# an axis besides size? Five off-axis criteria, then three controls: an inverse (one axis = curate flipped),
-# a size-neutral nonsense question (does size leak in anyway = size is a default), and an explicit size
-# probe (can it read size; ceiling for size-driven agreement). `lenia pool arm` reports them.
-_RADICAL = {
-    "weird_dual": ("Which creature is weirder?", "is weirder"),
-    "satisfying_dual": ("Which creature is more satisfying to watch?", "is more satisfying to watch"),
-    "violent_dual": ("Which creature looks more violent?", "looks more violent"),
-    "cute_dual": ("Which creature is cuter?", "is cuter"),
-    "deepsea_dual": ("Which creature looks more like a deep-sea creature?", "looks more like a deep-sea creature"),
-    "ugly_dual": ("Which creature is uglier?", "is uglier"),                                    # control: inverse
-    "petrock_dual": ("Which creature would make a better pet rock?", "would make a better pet rock"),  # control: nonsense
-    "smaller_dual": ("Which creature is smaller?", "is smaller"),                               # control: size probe
-}
-for _k, (_q, _v) in _RADICAL.items():
-    PROMPTS[_k] = {"instructions": CONTEXT_DUAL + _q,
-                   "first": f"The creature in {{A}} {_v}.", "second": f"The creature in {{B}} {_v}."}
-RADICAL_ARM = list(_RADICAL)
 
+# The surprise detector (validated: archive/scripts/surprise_check.py validate, runs/surprise-val).
+SURPRISE = "surprise_unusual_interesting"
+PROMPTS.setdefault(SURPRISE, {
+    "instructions": ("You are shown two worlds from a mass-conserving variant of Lenia, a continuous cellular automaton "
+                     "used in artificial-life research. Each image shows one whole world as four snapshots taken some time "
+                     "apart, in reading order (top-left, top-right, bottom-left, bottom-right); the colours are three "
+                     "interacting chemical channels. The two images are {A} and {B}. Which world shows something more "
+                     "unusual and interesting: a distinct feature or behaviour that stands out, rather than just more or "
+                     "less of the same, a different size, or a different colour?"),
+    "first": "The world in {A} shows something more unusual and interesting.",
+    "second": "The world in {B} shows something more unusual and interesting."})
+
+
+# Goal-session interest check (held-out comparisons of goal vs free branches).
+WORLD = ("You are shown {N} from a mass-conserving variant of Lenia, a continuous cellular automaton used in "
+         "artificial-life research. Each image shows one whole world as four snapshots taken some time apart, long "
+         "enough to show movement and change, in reading order (top-left, top-right, bottom-left, bottom-right); the "
+         "colours are three interacting chemical channels.")
+INTEREST = "goal_session_interest"
+PROMPTS.setdefault(INTEREST, {
+    "instructions": WORLD.replace("{N}", "two worlds") + " The two images are {A} and {B}. Which world is more "
+                    "interesting as artificial life: richer structure or behaviour, more like something alive, more "
+                    "worth exploring further?",
+    "first": "The world in {A} is more interesting.", "second": "The world in {B} is more interesting."})
+
+
+# Goal prompts, registered per goal: steer drives an expedition; attain is the held-out check (Luna).
+def steer_prompt(g: dict) -> str:
+    pid = f"goal_steer_{g['id']}"
+    PROMPTS.setdefault(pid, {
+        "instructions": WORLD.replace("{N}", "two worlds") + " The two images are {A} and {B}. We are steering an "
+                        f"evolutionary process toward a goal. The world it started from showed this: {g['sees']}. "
+                        f"The goal: {g['push']}. Which world would you choose as the parent for the next generation, "
+                        "to move toward this goal?",
+        "first": "I would choose the world in {A} as the parent.",
+        "second": "I would choose the world in {B} as the parent."})
+    return pid
+
+
+def attain_prompt(g: dict) -> str:
+    pid = f"goal_attain_{g['id']}"
+    PROMPTS.setdefault(pid, {
+        "instructions": WORLD.replace("{N}", "two worlds") + " The two images are {A} and {B}. Both descend from a "
+                        f"world that showed this: {g['sees']}. We wanted this change: {g['push']}. Which world shows "
+                        "this change more clearly?",
+        "first": "The world in {A} shows it more clearly.", "second": "The world in {B} shows it more clearly."})
+    return pid
+
+
+# ---------- multiple choice: matching a world to a goal-library entry (goal sessions, arm L) ----------
+
+NONE = "none"
+
+
+# The five groups a goal session steers by, and its matching instructions (goal_session.py).
+STEER = {"interior": "the inside of the main body", "shape": "the overall shape and size of the main body",
+         "surroundings": "what is around the main body",
+         "bodies": "how many bodies there are and how they relate to each other",
+         "change": "how the world changes between the snapshots"}
+SESSION_MATCH = (WORLD.replace("{N}", "one world").replace("Each image shows", "The image {W} shows") +
+         " Looking only at {ABOUT}, which description best matches this world? If none of them fits, choose "
+         "\"None of these fits.\"")
+
+
+# ---------- lookup ----------
 
 def get_prompt(prompt_id: str) -> dict[str, str]:
     if prompt_id not in PROMPTS:

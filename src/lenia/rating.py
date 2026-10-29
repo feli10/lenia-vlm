@@ -2,11 +2,16 @@
 to <folder>/human.csv straight away; pairs come from <folder>/<source> (a JSON list of [a, b] image ids, images in
 <folder>/images/<id>.png), a fixed random subset with random sides kept in human_pairs.json.
 Moved here verbatim on 2026-10-28 from src/lenia/vlmtest.py (now in archive/).
+
+Also a one-world-at-a-time label page (unusual / typical / unsure, `rate_labels`), moved from
+scripts/surprise_check.py (now in archive/); answers go to <folder>/ratings.csv, read with `label_answers`.
 """
 from __future__ import annotations
 
 import csv
 import json
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -175,3 +180,84 @@ def rate(out: Path, n: int = 60, port: int = 8765, open_browser: bool = True, so
         pass
     finally:
         srv.server_close()
+
+
+# ---------- one world at a time: unusual / typical / unsure ----------
+
+LABEL_PAGE = """<!doctype html><meta charset=utf-8><title>something new?</title>
+<style>body{font:15px system-ui;background:#111;color:#eee;margin:16px}img{width:620px;border:1px solid #333}
+button{padding:8px 22px;font:15px system-ui;margin:8px 8px 0 0}#n{color:#999}input{width:600px;padding:6px;
+font:14px system-ui;background:#222;color:#eee;border:1px solid #444}</style>
+<div id=n></div><p>Does this world show <b>something unusual</b>: a feature or behaviour that stands out from the typical
+MaCE worlds we get (not just bigger, smaller, more of the same, or another colour)? Whether you have seen this
+particular world before does not matter. (four snapshots, reading order)</p><img id=im><br>
+<input id=note placeholder="optional: what stands out?"><br>
+<button data-a=new>unusual</button><button data-a=not_new>typical</button><button data-a=unsure>unsure</button>
+<script>
+let todo=[];async function load(){todo=await (await fetch('/todo')).json();show()}
+function show(){if(!todo.length){document.body.innerHTML='<h2>Done, thank you. Close this tab and press Ctrl-C.</h2>';return}
+document.getElementById('n').textContent=todo.length+' left';document.getElementById('im').src='/img/'+todo[0].image;
+document.getElementById('note').value=''}
+document.querySelectorAll('button').forEach(b=>b.onclick=async()=>{const t=todo[0];
+await fetch('/answer',{method:'POST',body:JSON.stringify({id:t.id,answer:b.dataset.a,note:document.getElementById('note').value})});
+todo.shift();show()});
+load()</script>"""
+
+
+def label_answers(out: Path) -> dict:
+    p = out / "ratings.csv"
+    return {int(r["id"]): r for r in csv.DictReader(open(p))} if p.exists() else {}
+
+
+def rate_labels(a) -> None:
+    """One world at a time: unusual / typical / unsure plus a note -> <out>/ratings.csv. a.out holds tasks.json
+    ([{id, image}]) and images/; a.port is the local port."""
+    import webbrowser
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    out = Path(a.out)
+    tasks = [{"id": t["id"], "image": t["image"]} for t in json.loads((out / "tasks.json").read_text())]
+    lock = threading.Lock()
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *x):
+            pass
+
+        def _send(self, code, body, ctype):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/":
+                return self._send(200, LABEL_PAGE.encode(), "text/html; charset=utf-8")
+            if self.path == "/todo":
+                done = label_answers(out)
+                return self._send(200, json.dumps([t for t in tasks if t["id"] not in done]).encode(), "application/json")
+            if self.path.startswith("/img/"):
+                f = out / "images" / Path(self.path).name
+                if f.exists():
+                    return self._send(200, f.read_bytes(), "image/png")
+            self._send(404, b"not found", "text/plain")
+
+        def do_POST(self):
+            x = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            with lock:
+                p = out / "ratings.csv"
+                new = not p.exists()
+                with open(p, "a", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=["time", "id", "answer", "note"])
+                    if new:
+                        w.writeheader()
+                    w.writerow({"time": round(time.time(), 1), "id": x["id"], "answer": x["answer"], "note": x.get("note", "")})
+            self._send(200, b"ok", "text/plain")
+
+    srv = ThreadingHTTPServer(("127.0.0.1", a.port), H)
+    url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    print(f"rating page: {url} ({len(tasks)} worlds; answers go to {out / 'ratings.csv'}; Ctrl-C to stop, progress is kept)")
+    webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass

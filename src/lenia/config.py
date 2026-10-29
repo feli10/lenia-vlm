@@ -21,8 +21,3 @@ def load(path: str | None = None) -> dict:
     if path:
         cfg = _merge(cfg, yaml.safe_load(Path(path).read_text()) or {})
     return cfg
-
-
-def resolve(cfg: dict, key: str) -> Path:
-    p = Path(cfg["paths"][key])
-    return p if p.is_absolute() else REPO_ROOT / p

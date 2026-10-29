@@ -65,18 +65,6 @@ def _resolve() -> dict:
     return _state
 
 
-def info() -> str:
-    return _resolve()["label"]
-
-
-def is_torch() -> bool:
-    return _resolve()["kind"] == "torch"
-
-
-def is_gpu() -> bool:
-    return _resolve()["device"] in ("cuda", "mps")
-
-
 def to_device(A: np.ndarray):
     s = _resolve()
     A = np.ascontiguousarray(A, dtype=np.float32)

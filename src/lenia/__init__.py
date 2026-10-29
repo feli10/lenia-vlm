@@ -1,1 +1,1 @@
-"""Lenia as a domain for VLM-judged aesthetics: simulator, alive classifier, seed bank, surveys."""
+"""MaCE-Lenia worlds, their judges and prompts, for open-ended evolution steered by foundation models."""

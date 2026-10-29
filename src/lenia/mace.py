@@ -2,7 +2,7 @@
 rules, rule mutation, the grid-noise (texture) measure, and the complexity prompt.
 
 Moved here verbatim on 2026-10-28 from scripts/mace_evo.py (the retired hill climber: simulate, picture,
-founders, the complexity prompt) and src/lenia/explore.py (mutate, texture), both now in archive/. Do not edit
+founders, the complexity prompt) and src/lenia/explore.py (mutate, texture) and src/lenia/alive.py (bodies), all now in archive/. Do not edit
 picture(), the prompt text or mutate() casually: judge caches are keyed on the picture bytes and the prompt
 text, and saved runs depend on mutate(). tests/test_golden.py guards all three.
 """
@@ -15,21 +15,10 @@ from PIL import Image
 
 from . import backend, render, seeds
 from .prompts import PROMPTS
+from .prompts import COMPLEXITY as PROMPT_ID   # the complexity prompt (text in prompts.py)
 from .sample import sample
 from .sim import Kernel, Rule, with_flow
 
-PROMPT_ID = "evolve_complexity_world"
-PROMPTS.setdefault(PROMPT_ID, {
-    "instructions": ("You are shown two worlds from a mass-conserving variant of Lenia, a continuous cellular automaton "
-                     "used in artificial-life research. Each image shows one whole world as four snapshots taken a few "
-                     "time apart, long enough to show movement and change, in reading order (top-left, top-right, "
-                     "bottom-left, bottom-right); the colours are "
-                     "three interacting chemical channels. The two images are {A} and {B}. We are running an "
-                     "evolutionary process whose goal is to reach more complex, life-like structure over many "
-                     "generations. Which world would you choose as the parent for the next generation?"),
-    "first": "I would choose the world in {A} as the parent.",
-    "second": "I would choose the world in {B} as the parent.",
-})
 
 FRAMES, TILE = 4, 320                        # 4 snapshots, each drawn 320 px (image 640x640)
 
@@ -125,3 +114,21 @@ def texture(P: np.ndarray, cutoff: float = TEXTURE_CUTOFF) -> float:
         num += m * float(F[hi].sum()) / max(float(F.sum()), 1e-12)
         den += m
     return num / den if den else 0.0
+
+
+# ---------- bodies (connected components on the torus; the map's bodies axis) ----------
+
+def bodies(mask: np.ndarray, max_iter: int = 4096) -> np.ndarray:
+    """Connected components of a boolean mask on the torus (4-neighbour), by min-label propagation."""
+    H, W = mask.shape
+    big = H * W
+    lab = np.where(mask, np.arange(big).reshape(H, W), big)
+    for _ in range(max_iter):
+        n = lab
+        for ax, sh in ((0, 1), (0, -1), (1, 1), (1, -1)):
+            n = np.minimum(n, np.roll(lab, sh, axis=ax))
+        n = np.where(mask, n, big)
+        if np.array_equal(n, lab):
+            break
+        lab = n
+    return lab

@@ -6,7 +6,8 @@ expected values only on purpose, when you mean to start fresh caches:
 
   PYTHONPATH=src:scripts python3 tests/test_golden.py --print
 
-Runs under pytest or as a plain script (python3 tests/test_golden.py).
+Runs under pytest or as a plain script (python3 tests/test_golden.py). Recorded before the 10-28 cleanup;
+the cleanup moved code and prompts without changing any of these values.
 """
 from __future__ import annotations
 
@@ -27,14 +28,10 @@ for p in (ROOT / "src", ROOT / "scripts"):
 from lenia.judge import Judge, Query, image_hash          # noqa: E402
 from lenia.prompts import get_prompt                       # noqa: E402
 
-try:                                    # after the 10-28 cleanup
-    from lenia import mace as M
-    from lenia.mace import mutate, texture
-except ImportError:                     # before it
-    import mace_evo as M
-    from lenia.explore import mutate, texture
-import surprise_check                   # noqa: E402  (registers the surprise prompt)
-import goal_session                     # noqa: E402  (steer / attain prompt templates)
+from lenia import mace as M                                   # noqa: E402
+from lenia.mace import mutate, texture                        # noqa: E402
+from lenia.prompts import (INTEREST, NONE, SESSION_MATCH, STEER, SURPRISE,  # noqa: E402
+                           attain_prompt, steer_prompt)
 
 GOAL = {"id": "golden", "sees": "a round body with a dark core", "push": "make the core split in two"}
 
@@ -46,9 +43,13 @@ def _h(obj) -> str:
 def compute() -> dict:
     out = {}
     out["prompt/complexity"] = _h(get_prompt(M.PROMPT_ID))
-    out["prompt/surprise"] = _h(get_prompt(surprise_check.SURPRISE))
-    out["prompt/steer"] = _h(get_prompt(goal_session.steer_prompt(GOAL)))
-    out["prompt/attain"] = _h(get_prompt(goal_session.attain_prompt(GOAL)))
+    out["prompt/surprise"] = _h(get_prompt(SURPRISE))
+    out["prompt/steer"] = _h(get_prompt(steer_prompt(GOAL)))
+    out["prompt/attain"] = _h(get_prompt(attain_prompt(GOAL)))
+    out["prompt/interest"] = _h(get_prompt(INTEREST))
+    out["menu/session_match"] = _h(SESSION_MATCH)                 # multiple-choice texts key the cache too
+    out["menu/steer_groups"] = _h(STEER)
+    out["menu/none"] = NONE
     rng = np.random.default_rng(0)
     frames = rng.random((M.FRAMES, 3, 40, 40)).astype(np.float32)
     pic = M.picture(frames)
@@ -104,8 +105,12 @@ EXPECTED = {
         5264.0029296875,
         0.8589450120925903
     ],
-    "texture": 0.021451515386685997
-}   # recorded 2026-10-28 (cleanup); prompts, founders, mutate, simulate unchanged from before it
+    "texture": 0.021451515386685997,
+    "prompt/interest": "9b858956b3910b81",
+    "menu/session_match": "824bc47345e20218",
+    "menu/steer_groups": "54b0d7e501852ce9",
+    "menu/none": "none"
+}   # recorded 2026-10-28 (cleanup); prompts, founders, mutate, simulate unchanged from before it; menus and interest added before the prompt move
 
 
 def test_golden():

@@ -1,6 +1,6 @@
 """Goal-steered branches vs. generic-prompt branches from the same MAP-Elites elites (agent sessions, pilot).
 
-Step 1 (goal_groups.py, project doc "Goal matching results") showed Jev can say what a world shows: Felix said yes
+Step 1 (archive/scripts/goal_groups.py, project doc "Goal matching results") showed Jev can say what a world shows: Felix said yes
 to 82% of its picks vs 46% of decoys. This pilot asks whether steering by a matched goal does anything.
 
 Setup
@@ -58,53 +58,15 @@ from lenia.config import REPO_ROOT, load
 from lenia.mace import mutate
 from lenia.judge import ChoiceQuery, Judge, Query, load_env
 from lenia.prompts import PROMPTS
+from lenia.prompts import INTEREST, NONE, STEER, WORLD, attain_prompt, steer_prompt   # texts in prompts.py
+from lenia.prompts import SESSION_MATCH as MATCH
 from lenia.sim import Rule
 
-STEER = {"interior": "the inside of the main body", "shape": "the overall shape and size of the main body",
-         "surroundings": "what is around the main body",
-         "bodies": "how many bodies there are and how they relate to each other",
-         "change": "how the world changes between the snapshots"}
-NONE = "none"
-WORLD = ("You are shown {N} from a mass-conserving variant of Lenia, a continuous cellular automaton used in "
-         "artificial-life research. Each image shows one whole world as four snapshots taken some time apart, long "
-         "enough to show movement and change, in reading order (top-left, top-right, bottom-left, bottom-right); the "
-         "colours are three interacting chemical channels.")
-MATCH = (WORLD.replace("{N}", "one world").replace("Each image shows", "The image {W} shows") +
-         " Looking only at {ABOUT}, which description best matches this world? If none of them fits, choose "
-         "\"None of these fits.\"")
 FREE = ME.PROMPT_ID
-INTEREST = "goal_session_interest"
-PROMPTS.setdefault(INTEREST, {
-    "instructions": WORLD.replace("{N}", "two worlds") + " The two images are {A} and {B}. Which world is more "
-                    "interesting as artificial life: richer structure or behaviour, more like something alive, more "
-                    "worth exploring further?",
-    "first": "The world in {A} is more interesting.", "second": "The world in {B} is more interesting."})
 
 
 def _cap(s: str) -> str:
     return s[:1].upper() + s[1:]
-
-
-def steer_prompt(g: dict) -> str:
-    pid = f"goal_steer_{g['id']}"
-    PROMPTS.setdefault(pid, {
-        "instructions": WORLD.replace("{N}", "two worlds") + " The two images are {A} and {B}. We are steering an "
-                        f"evolutionary process toward a goal. The world it started from showed this: {g['sees']}. "
-                        f"The goal: {g['push']}. Which world would you choose as the parent for the next generation, "
-                        "to move toward this goal?",
-        "first": "I would choose the world in {A} as the parent.",
-        "second": "I would choose the world in {B} as the parent."})
-    return pid
-
-
-def attain_prompt(g: dict) -> str:
-    pid = f"goal_attain_{g['id']}"
-    PROMPTS.setdefault(pid, {
-        "instructions": WORLD.replace("{N}", "two worlds") + " The two images are {A} and {B}. Both descend from a "
-                        f"world that showed this: {g['sees']}. We wanted this change: {g['push']}. Which world shows "
-                        "this change more clearly?",
-        "first": "The world in {A} shows it more clearly.", "second": "The world in {B} shows it more clearly."})
-    return pid
 
 
 # ---------- setup ----------
@@ -176,7 +138,7 @@ def match(judge, L: dict, pics: list, rng, desc: str) -> list:
 
 
 def draw_goals(L: dict, probs: dict, n: int, rng, exclude: set) -> list:
-    """n distinct observations, each the top pick of its group (what goal_groups.py verified), sampled
+    """n distinct observations, each the top pick of its group (what goal_groups.py verified; now in archive/), sampled
     proportional to Jev's match probability; if fewer than n groups have a usable top pick, the next best
     observations fill up. One random direction each."""
     top = []

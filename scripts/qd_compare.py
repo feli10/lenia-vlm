@@ -3,7 +3,7 @@ somewhere different from uniform parent selection (mace-qd2, same settings and s
 
 Both final archives are pooled. Every elite meets --opponents random elites of the pool (both archives, never
 itself), both orders, under
-  - the surprise prompt (surprise_check.py; validated against Felix's ratings) with Luna (held out: Luna never
+  - the surprise prompt (lenia.prompts.SURPRISE; validated against Felix's ratings) with Luna (held out: Luna never
     drove either run) and with Jev (the driver of qd3's parent selection, so partly circular for qd3), and
   - the complexity prompt (lenia.mace; the entry duel of both runs) with Luna, as a quality check.
 A score is the mean win probability, so both archives are measured against the same reference. Reported: mean
@@ -12,7 +12,7 @@ permutation p-value, and the share of each archive among the pool's top 20. Elit
 independent, so the p-values are optimistic.
 
 Felix's blind check: 12 random elites from each archive (not chosen by any judge), shuffled; same question as the
-surprise check ("something unusual here, compared with the typical MaCE world?"), rated with surprise_check.py.
+surprise check ("something unusual here, compared with the typical MaCE world?"), rated with `qd_compare.py rate`.
 
 Runs with a surprise archive (mace_qd.py --sarch): its members join the pool as a third group, "<run> (archive)",
 and get their own row, so the map (did keeping surprising worlds as stepping stones change what the map ends up
@@ -22,7 +22,7 @@ separately. Felix's sample then adds 12 random archive members.
   uv run python scripts/qd_compare.py score --a runs/mace-qd2 --b runs/mace-qd5-sarch-s0 --out runs/qd5-compare-s0
 
   uv run python scripts/qd_compare.py score                            # ~12,500 judge calls, about $1-2 (Mac)
-  uv run python scripts/surprise_check.py rate --out runs/qd-compare   # your 24 ratings
+  uv run python scripts/qd_compare.py rate --out runs/qd-compare       # your 24 ratings
   uv run python scripts/qd_compare.py report
 """
 from __future__ import annotations
@@ -39,8 +39,9 @@ from PIL import Image
 import mace_qd as QD
 from lenia.config import REPO_ROOT, load
 from lenia.judge import Judge, Query, load_env
-from lenia.mace import PROMPT_ID as COMPLEXITY
-from surprise_check import SURPRISE, _answers, auc, fisher_greater
+from lenia.prompts import COMPLEXITY, SURPRISE
+from lenia.rating import label_answers as _answers, rate_labels
+from lenia.stats import auc, fisher_greater
 
 N_RATE, TOP = 12, 20
 
@@ -166,15 +167,16 @@ def report(a) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["score", "report"])
+    ap.add_argument("cmd", choices=["score", "rate", "report"])
     ap.add_argument("--a", default="runs/mace-qd2", help="control run")
     ap.add_argument("--b", default="runs/mace-qd3-surprise", help="treatment run")
     ap.add_argument("--out", default="runs/qd-compare")
     ap.add_argument("--opponents", type=int, default=6)
     ap.add_argument("--config", default=None)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--port", type=int, default=8769, help="rate: local port of the rating page")
     a = ap.parse_args()
-    {"score": score, "report": report}[a.cmd](a)
+    {"score": score, "rate": rate_labels, "report": report}[a.cmd](a)
 
 
 if __name__ == "__main__":

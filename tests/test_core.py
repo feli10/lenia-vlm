@@ -1,4 +1,4 @@
-"""Live core: simulator, seeds, sampler, body counting, judge request shapes, the rating page (offline, a few s).
+"""Live core: simulator, sampler, body counting, judge request shapes, the rating pages (offline, a few s).
 The simulator and judge tests are copied verbatim from the old tests/test_lenia.py (now in archive/tests/).
 """
 from __future__ import annotations
@@ -7,23 +7,12 @@ import json
 
 import numpy as np
 
-from lenia import seeds
-from lenia.alive import Thresholds, bodies, count_bodies
-from lenia.rle import rle2arr
+from lenia.mace import bodies
 from lenia.sample import sample
 from lenia.sim import Batch, Kernel, Rule, kernel_fields
 
 SHAPE = (96, 96)
-ORBIUM = Rule.from_chan({"R": 13, "T": 10, "b": "1", "m": 0.15, "s": 0.015, "kn": 1, "gn": 1})
 
-
-def orbium_cells():
-    return rle2arr(seeds.donors()["O2u"]["cells"])
-
-def test_rle_orbium():
-    c = orbium_cells()
-    assert c.shape == (20, 20)
-    assert abs(c.sum() - 76.86) < 0.01
 
 def test_chan_params():
     r = Rule.from_chan([{"R": 20, "T": 10, "b": "1/2,1", "m": 0.2, "s": 0.02, "h": 0.5, "r": 0.8, "c": [0, 1]},
@@ -42,15 +31,7 @@ def test_bodies_on_torus():
     m[20:24, 20:24] = True                         # a second one
     lab = bodies(m)
     assert len(np.unique(lab[m])) == 2
-    F = m.astype(float)
-    assert count_bodies(F, R=4, th=Thresholds()) == 2
 
-def test_seed_bank():
-    for spec in seeds.DEFAULT_BANK:
-        a = seeds.make(spec, 13, SHAPE, 1)
-        b = seeds.make(spec, 13, SHAPE, 1)
-        assert a.shape == (1,) + SHAPE and np.array_equal(a, b) and 0 <= a.min() and a.max() <= 1 and a.sum() > 1
-    assert seeds.make(seeds.DEFAULT_BANK[0], 13, SHAPE, 3).shape == (3,) + SHAPE
 
 def test_sampler_structures():
     mc = sample("multichannel", 3, seed=0, channels=3, self_k=2, cross_k=1)
@@ -76,7 +57,7 @@ def test_request_shapes(monkeypatch, tmp_path):
     monkeypatch.setenv("TYPESAFE_API_KEY", "y")
     for b in ("decisions", "jev"):
         j = Judge(b, {"backend": b, "model": "m"}, tmp_path / "cache.sqlite", log=lambda m: None)
-        v = j._call(Query("appeal", img, img2))
+        v = j._call(Query("evolve_complexity_world", img, img2))
         assert abs(v.p_first - 0.2) < 1e-9 and v.choice == "second"
     url, body, headers = seen["jev"]
     assert url.endswith("/v1/systemone") and headers["TypeSafe-Danger-Zone-Images"] == "true"
@@ -144,3 +125,43 @@ def test_rating_page(tmp_path):
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+def test_label_page_and_stats(tmp_path):
+    """lenia.rating.rate_labels' page records one answer per world; lenia.stats gives sane AUC / Fisher values."""
+    import threading
+    import urllib.request
+    from argparse import Namespace
+    from http.server import ThreadingHTTPServer
+    from PIL import Image
+    from lenia import rating
+    from lenia.stats import auc, fisher_greater
+    (tmp_path / "images").mkdir()
+    Image.fromarray(np.zeros((16, 16, 3), np.uint8)).save(tmp_path / "images" / "w00.png")
+    (tmp_path / "tasks.json").write_text(json.dumps([{"id": 0, "image": "w00.png"}, {"id": 1, "image": "w00.png"}]))
+    started = {}
+    real_init = ThreadingHTTPServer.__init__
+
+    def init(self, addr, handler):                      # bind to a free port and serve in a thread, no browser
+        real_init(self, ("127.0.0.1", 0), handler)
+        started["srv"] = self
+    import webbrowser
+    ThreadingHTTPServer.__init__, webbrowser.open = init, lambda url: None
+    try:
+        th = threading.Thread(target=rating.rate_labels, args=(Namespace(out=str(tmp_path), port=0),), daemon=True)
+        th.start()
+        while "srv" not in started:
+            pass
+        base = f"http://127.0.0.1:{started['srv'].server_address[1]}"
+        assert len(json.loads(urllib.request.urlopen(base + "/todo").read())) == 2
+        urllib.request.urlopen(urllib.request.Request(base + "/answer", method="POST",
+                               data=json.dumps({"id": 0, "answer": "new", "note": "x"}).encode()))
+        assert [t["id"] for t in json.loads(urllib.request.urlopen(base + "/todo").read())] == [1]
+        assert rating.label_answers(tmp_path)[0]["answer"] == "new"
+    finally:
+        ThreadingHTTPServer.__init__ = real_init
+        if "srv" in started:
+            started["srv"].shutdown()
+    a, p = auc([0.9, 0.8, 0.2, 0.1], [1, 1, 0, 0], n_perm=500)
+    assert a == 1.0 and p < 0.5
+    assert abs(fisher_greater(6, 0, 1, 6) - 0.0047) < 0.001

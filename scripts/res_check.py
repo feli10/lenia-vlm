@@ -27,11 +27,8 @@ from PIL import Image
 
 from lenia.config import REPO_ROOT, load
 from lenia.judge import JEV_USD_PER_TOKEN, Judge, Query, image_hash, load_env
-from lenia.prompts import get_prompt
-import surprise_check
-from lenia import mace
-
-SUR, COMP = surprise_check.SURPRISE, mace.PROMPT_ID
+from lenia.prompts import COMPLEXITY as COMP, SURPRISE as SUR, get_prompt
+from lenia.rating import label_answers
 THR = 0.66          # the surprise archive's threshold in mace-qd5-sarch-s0 (median)
 
 
@@ -49,11 +46,6 @@ def load_img(p) -> np.ndarray:
     return np.asarray(Image.open(p).convert("RGB"))
 
 
-def old_key(be, model, pid, a, b, sample=0):
-    p = {"backend": be, "model": model, "prompt": get_prompt(pid), "a": a, "b": b, "sample": sample}
-    return hashlib.sha256(json.dumps(p, sort_keys=True).encode()).hexdigest()
-
-
 def sets(a) -> dict:
     """{name: {"pairs": [(focal_id, opp_id)], "img": {id: path}, "label": {id: 1/0}, "group": {id: str},
     "old": {id: 644-px score}, "prompt": pid}}"""
@@ -62,7 +54,7 @@ def sets(a) -> dict:
     # val
     S = json.loads(Path("runs/surprise-val/scores.json").read_text())
     tasks = json.loads(Path("runs/surprise-val/tasks.json").read_text())
-    ans = surprise_check._answers(Path("runs/surprise-val"))
+    ans = label_answers(Path("runs/surprise-val"))
     lab = {t["name"]: int(ans[t["id"]]["answer"] == "new") for t in tasks
            if t["id"] in ans and ans[t["id"]]["answer"] in ("new", "not_new")}
     rated = [t["name"] for t in tasks]
@@ -75,7 +67,7 @@ def sets(a) -> dict:
     C = json.loads(Path("runs/qd5-compare-s0/compare.json").read_text())
     pool, opp = C["pool"], C["opponents"]
     tasks = json.loads(Path("runs/qd5-compare-s0/tasks.json").read_text())
-    ans = surprise_check._answers(Path("runs/qd5-compare-s0"))
+    ans = label_answers(Path("runs/qd5-compare-s0"))
     lab = {pool[t["pool_index"]]["image"]: int(ans[t["id"]]["answer"] == "new") for t in tasks
            if t["id"] in ans and ans[t["id"]]["answer"] in ("new", "not_new")}
     rated = [t["pool_index"] for t in tasks]

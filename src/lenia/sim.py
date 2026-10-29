@@ -258,12 +258,3 @@ def place(cells: np.ndarray, shape, C: int = 1) -> np.ndarray:
     return A
 
 
-def noise_seed(R: float, shape, C: int, seed: int, size_r: float = 2.0, density: float = 1.0) -> np.ndarray:
-    """A square of uniform noise, `size_r` kernel radii wide, in the middle of the world (one per channel)."""
-    rng = np.random.default_rng(seed)
-    n = max(4, int(round(size_r * R)))
-    return place(rng.random((C, n, n)) * density, shape, C)
-
-
-def mutate_copy(rule: Rule) -> Rule:
-    return copy.deepcopy(rule)

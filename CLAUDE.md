@@ -17,7 +17,8 @@ the current plan is "VLM in the loop - escalation plan (core first)".
 - Say what comes from papers and what is ours.
 
 ## Do not break the caches
-Judge caches are keyed on the prompt text and the picture bytes, and saved runs depend on `mutate()`, the
+All judge prompts live in `src/lenia/prompts.py`; add new ones there, never in scripts. Judge caches are keyed on
+the prompt text and the picture bytes, and saved runs depend on `mutate()`, the
 founders and the simulator. `tests/test_golden.py` checks all of these; it must pass before and after any
 change. Changing a prompt or `lenia.mace.picture` on purpose means starting fresh caches.
 

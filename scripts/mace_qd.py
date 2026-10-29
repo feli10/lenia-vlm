@@ -35,16 +35,9 @@ inherited, so elite and challenger are always the same age.
 - Variation: kernel mutation at --mut-scale plus beta x exp(N(0, 0.1)) in [0.5, 4], as in the hill climber (lenia.mace.mutate).
 - Seeds: the 12 founders (lenia.mace.founders) plus --init more draws of the same sampler. Every elite records the seed
   it descends from ("root").
-- Parent selection (--parent-select): "uniform" (v1, v2) picks parents uniformly from the island's elites.
-  "surprise" (v3) scores every elite with Jev's surprise duel (surprise_check.py, validated against Felix's
-  ratings: "which world shows something more unusual and interesting ..."), each elite against
-  --surprise-opponents random other elites of the current archive (all islands), both orders; new elites are
-  scored when they enter and the whole archive is re-scored every --surprise-every iterations, so "unusual"
-  always means unusual relative to what the archive holds now. A share --surprise-mix of parents is still drawn
-  uniformly; the rest with probability proportional to exp(score / --surprise-temp). Surprise only decides where
-  to search; entry into a cell is still the complexity duel against the incumbent. --surprise-ref other-lineages
-  draws the opponents only from other seed lineages, so a lineage that spreads over many cells is not made
-  "typical" by its own relatives and keeps being refined.
+- Parent selection: uniform from the island's elites (plus the surprise archive's members with --sarch).
+  Surprise-weighted parent selection (v3, --parent-select surprise) was retired on 2026-10-28 (null on the
+  replicate); the full script with it is archive/scripts/mace_qd_full.py.
 - Surprise archive (--sarch, v4): surprise decides what is *kept*, not only what is mutated. After the map
   insertions of an iteration, --sarch-candidates random challengers per island that did not get into the map
   (lost the complexity duel or the competition for their cell; grid noise excluded) are judged with the surprise
@@ -55,7 +48,6 @@ inherited, so elite and challenger are always the same age.
   compete for the map like any other. This is novelty search's archive (Lehman & Stanley 2011) with the
   validated surprise duel as the novelty measure, including their adaptive threshold: +0.02 when more than
   2 enter in one iteration, -0.02 after 5 iterations with none, within [0.5, 0.9], from --sarch-threshold.
-  Parent selection inside the map stays uniform unless --parent-select surprise is also given.
 Saves state after every iteration (resumes) and a snapshot of the maps every --snapshot-every iterations.
 """
 from __future__ import annotations
@@ -74,7 +66,7 @@ from PIL import Image, ImageDraw
 
 from lenia import mace as ME
 from lenia import backend, render, seeds
-from lenia.alive import bodies as label_bodies
+from lenia.mace import bodies as label_bodies
 from lenia.config import REPO_ROOT, load
 from lenia.mace import mutate, texture
 from lenia.judge import Judge, Query, load_env
@@ -284,63 +276,13 @@ def lineages(st: dict) -> int:
     return len({e.get("root") for arch in islands_of(st) for e in arch.values()})
 
 
-# ---------- surprise-weighted parent selection (v3) ----------
-
-def score_surprise(st: dict, which: list, judge, out: Path, rng, a, desc: str) -> int:
-    """Jev surprise score for the elites `which` ([(island, cell)]) against random other elites of the current
-    archive; stored as e["surprise"]. Returns the number of judge calls."""
-    from surprise_check import SURPRISE
-    allk = [(k, ck) for k, m in enumerate(islands_of(st)) for ck in m]
-    if len(allk) < 2 or not which:
-        return 0
-    cache = {}
-
-    def pic(k, ck):
-        name = islands_of(st)[k][ck]["image"]
-        if name not in cache:
-            cache[name] = np.asarray(Image.open(out / "img" / name).convert("RGB"))
-        return cache[name]
-
-    qs, meta = [], []
-    for k, ck in which:
-        others = [x for x in allk if x != (k, ck)]
-        if a.surprise_ref == "other-lineages":            # judge a lineage only against other lineages, so its own
-            root = islands_of(st)[k][ck].get("root")      # relatives filling the map do not make it "typical"
-            diff = [x for x in others if islands_of(st)[x[0]][x[1]].get("root") != root]
-            others = diff if len(diff) >= a.surprise_opponents else others
-        for j in rng.choice(len(others), min(a.surprise_opponents, len(others)), replace=False):
-            o = others[int(j)]
-            qs += [Query(SURPRISE, pic(k, ck), pic(*o)), Query(SURPRISE, pic(*o), pic(k, ck))]
-            meta.append((k, ck))
-    vs = judge.judge_many(qs, desc=desc)
-    acc = {}
-    for d, key in enumerate(meta):
-        x, y = vs[2 * d], vs[2 * d + 1]
-        if x.ok and y.ok:
-            acc.setdefault(key, []).append(0.5 * (x.p_first + 1 - y.p_first))
-    it = st["it"]
-    for (k, ck), v in acc.items():
-        e = islands_of(st)[k][ck]
-        e["surprise"], e["surprise_it"] = round(float(np.mean(v)), 4), it
-    return len(qs)
-
-
-def pick_parent(arch: dict, keys: list, rng, a) -> str:
-    if a.parent_select != "surprise" or rng.random() < a.surprise_mix:
-        return keys[int(rng.integers(len(keys)))]
-    sc = np.array([arch[k].get("surprise", np.nan) for k in keys], float)
-    sc = np.where(np.isnan(sc), np.nanmedian(sc) if np.isfinite(sc).any() else 0.5, sc)
-    w = np.exp((sc - sc.max()) / a.surprise_temp)
-    return keys[int(rng.choice(len(keys), p=w / w.sum()))]
-
-
 # ---------- surprise archive (v4) ----------
 
 def sarch_step(st: dict, outside: list, judge, out: Path, rng, a, it: int, slog) -> dict:
     """outside: [(island, cand, eval)] challengers the map rejected this iteration. Judges up to
     --sarch-candidates per island with the surprise duel against random members of map + surprise archive and
     adds those at or above the threshold. Returns counts."""
-    from surprise_check import SURPRISE
+    from lenia.prompts import SURPRISE
     sar = st.setdefault("sarch", [])
     pick = []
     for k in range(a.islands):
@@ -405,6 +347,9 @@ def run(a) -> None:
         keep = ("iterations", "backend", "judge", "out", "config", "sim_batch")
         if "parent_select" not in st["args"]:                    # older runs: uniform parent selection
             st["args"]["parent_select"] = "uniform"
+        if st["args"]["parent_select"] == "surprise":
+            sys.exit("this run used --parent-select surprise (v3), retired on 2026-10-28: resume it with "
+                     "archive/scripts/mace_qd_full.py")
         st["args"].setdefault("sarch", False)
         st["args"].update({k: getattr(a, k) for k in keep})
         a = settings(st)
@@ -452,7 +397,7 @@ def run(a) -> None:
                         m.beta = float(np.clip(par.beta * np.exp(rng.normal(0, 0.1)), 0.5, 4.0))
                         g.append((m, f"I{k}:S:{se['image']}", se.get("root")))
                         continue
-                    pk = pick_parent(arch, keys, rng, a)
+                    pk = keys[int(rng.integers(len(keys)))]
                     par = Rule.from_dict(arch[pk]["rule"])
                     m = mutate(par, rng, a.mut_scale)
                     m.flow = "mace"
@@ -489,15 +434,6 @@ def run(a) -> None:
         if a.sarch and it > 0:
             res.update(sarch_step(st, outside, judge, out, np.random.default_rng([a.seed, it, 11]), a, it, slog))
             sfh.flush()
-        if a.parent_select == "surprise":
-            srng = np.random.default_rng([a.seed, it, 7])
-            if it % a.surprise_every == 0:
-                which = [(k, ck) for k, m in enumerate(islands_of(st)) for ck in m]
-            else:
-                which = [(k, ck) for k, m in enumerate(islands_of(st)) for ck, e in m.items() if "surprise" not in e]
-            res["surprise_calls"] += score_surprise(st, which, judge, out, srng, a, f"it {it} surprise")
-            sv = [e["surprise"] for m in islands_of(st) for e in m.values() if "surprise" in e]
-            res["surprise_mean_x1000"] = int(1000 * np.mean(sv)) if sv else 0
         fh.flush()
         filled = sum(len(m) for m in islands_of(st))
         st["progress"].append({"it": it, "filled": filled, "lineages": lineages(st), **dict(res), "sec": round(time.time() - t0, 1)})
@@ -509,7 +445,6 @@ def run(a) -> None:
         print(f"it {it}: {filled} cells filled, {lineages(st)} seed lineages, {res['new']} new, {res['replaced']} replaced, "
               f"{res['duels']} duels, {res['texture_fail']} grid-noise"
               + (f", {res['migrated']} migrants settled" if K > 1 and it % a.migrate_every == 0 and it else "")
-              + (f", archive surprise {res['surprise_mean_x1000'] / 1000:.2f}" if a.parent_select == "surprise" else "")
               + (f", surprise archive +{res['sarch_added']}/{res['sarch_judged']} -> {len(st.get('sarch', []))} "
                  f"(threshold {st.get('sarch_thr', a.sarch_threshold):.2f})" if a.sarch and it else "")
               + f", {time.time() - t0:.0f}s, judge spent ${judge.spent:.4f}", file=sys.stderr)
@@ -690,13 +625,7 @@ def main() -> None:
     r.add_argument("--threshold", type=float, default=0.6)
     r.add_argument("--mut-scale", type=float, default=3.0)
     r.add_argument("--snapshot-every", type=int, default=10)
-    r.add_argument("--parent-select", default="uniform", choices=["uniform", "surprise"])
     r.add_argument("--surprise-opponents", type=int, default=6)
-    r.add_argument("--surprise-every", type=int, default=20, help="re-score the whole archive every N iterations")
-    r.add_argument("--surprise-mix", type=float, default=0.5, help="share of parents still drawn uniformly")
-    r.add_argument("--surprise-temp", type=float, default=0.1)
-    r.add_argument("--surprise-ref", default="all", choices=["all", "other-lineages"],
-                   help="opponents for the surprise duel: any elite (v3), or only elites of other seed lineages")
     r.add_argument("--sarch", action="store_true", help="keep surprising map rejects in a surprise archive (v4)")
     r.add_argument("--sarch-candidates", type=int, default=3, help="rejected challengers judged per island per iteration")
     r.add_argument("--sarch-parents", type=float, default=0.25, help="share of each island's parents drawn from its archive members")
