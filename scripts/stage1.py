@@ -610,6 +610,207 @@ def sheet_arm(s1: Path, st: dict, res: dict, path: Path, px: int = 300) -> None:
     im.save(path)
 
 
+# ---------- heritability: do children keep their parent's progress? (after arm N, 10-29) ----------
+#
+# Arms L and N (v2) stalled after 1-3 steps: once a child scoring ~0.85 on its goal (vs the start) was accepted, its own
+# children averaged ~0.45, no better than mutants of the start. The mutation operator was inherited from the base search
+# (mut_scale 3.0 plus discrete ring edits whose chance does not depend on the scale), built to explore, not to develop a
+# feature. Here every expedition's end parent gets MUTANTS children under each (scale, struct) variant, judged exactly as
+# in an expedition (goal, complexity, surprise vs the start, both orders). Reported per variant: how much of the parent's
+# goal score the children keep, and how many would be accepted (goal >= parent + MARGIN, complexity >= K_FLOOR).
+VARIANTS = ((3.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.3, 0.0))       # (mut_scale, struct): the first is the current one
+
+
+def heritability(a) -> None:
+    s1, run = Path(a.out), Path(a.run)
+    hdir = s1 / "heritability"
+    hdir.mkdir(parents=True, exist_ok=True)
+    backend.configure(a.backend)
+    ea = eval_settings(run, a)
+    evals = Evals(Path(a.evals) if a.evals else s1 / "evals", ea)
+    judge = _judges(a, s1)
+    parents = []
+    for arm in a.arms.split(","):
+        st = json.loads((s1 / EXP_DIR / arm / "state.json").read_text())
+        parents += [(arm, tr) for tr in st["triggers"] if tr["history"]]
+    rules, meta = [], []
+    for v, (scale, struct) in enumerate(VARIANTS):
+        for arm, tr in parents:
+            rng = np.random.default_rng([a.seed, tr["index"], 900 + v, ARMS.index(arm)])
+            par = Rule.from_dict(tr["parent_rule"])
+            for c in range(a.mutants):
+                m = mutate(par, rng, scale, struct)
+                m.flow = "mace"
+                m.beta = float(np.clip(par.beta * np.exp(rng.normal(0, 0.1 * min(1.0, scale / 3.0))), 0.5, 4.0))
+                rules.append(m)
+                meta.append((v, arm, tr))
+    t0 = time.time()
+    ev = evals.get_many(rules)
+    print(f"{len(rules)} children grown in {time.time() - t0:.0f}s", file=sys.stderr)
+    starts = {}
+    mq, keep = [], []
+    for k, ((v, arm, tr), e) in enumerate(zip(meta, ev)):
+        if ea.max_texture > 0 and e["texture"] > ea.max_texture:
+            continue
+        S = starts.setdefault(tr["start"], _pic(s1, tr["start"]))
+        pids = (attain_prompt(tr["goals"][-1]), COMPLEXITY, SURPRISE)
+        mq += [MultiQuery(pids, e["pic"], S), MultiQuery(pids, S, e["pic"])]
+        keep.append(k)
+    vs = judge.judge_multi(mq, desc="heritability")
+    if any(not all(x.ok for x in xx) for xx in vs):
+        sys.exit("some judge requests failed (not cached); re-run to retry them")
+    rows = []
+    for n, k in enumerate(keep):
+        v, arm, tr = meta[k]
+        x, y = vs[2 * n], vs[2 * n + 1]
+        G, K, S_ = (0.5 * (x[q].p_first + 1 - y[q].p_first) for q in range(3))
+        rows.append({"variant": v, "arm": arm, "trigger": tr["id"], "parent_g": tr["g"], "G": round(G, 4), "K": round(K, 4),
+                     "S": round(S_, 4)})
+    n_tex = {v: sum(1 for (vv, *_), e in zip(meta, ev) if vv == v and ea.max_texture > 0 and e["texture"] > ea.max_texture)
+             for v in range(len(VARIANTS))}
+    (hdir / "results.json").write_text(json.dumps({"variants": VARIANTS, "mutants": a.mutants, "rows": rows, "texture": n_tex}, indent=1))
+    L = [f"# Heritability: children of each expedition's end parent ({len(parents)} parents, {a.mutants} children per variant)\n",
+         "Judged as in an expedition: goal, complexity, surprise vs the start, both orders. 'keeps' = goal score within 0.1 of "
+         f"the parent's; 'accepted' = goal >= parent + {MARGIN} and complexity >= {K_FLOOR}. Parents' mean goal score "
+         f"{np.mean([tr['g'] for _, tr in parents]):.2f}.\n",
+         "| mut_scale | ring edits | grid noise | child goal mean | child - parent (median) | keeps | accepted | complexity >= 0.45 | surprise mean |",
+         "|---|---|---|---|---|---|---|---|---|"]
+    for v, (scale, struct) in enumerate(VARIANTS):
+        rr = [r for r in rows if r["variant"] == v]
+        d = np.array([r["G"] - r["parent_g"] for r in rr])
+        acc = np.mean([(r["G"] >= r["parent_g"] + MARGIN and r["K"] >= K_FLOOR) for r in rr])
+        L.append(f"| {scale} | {'yes' if struct else 'no'}{' (current)' if v == 0 else ''} | {n_tex[v]} | {np.mean([r['G'] for r in rr]):.2f} | "
+                 f"{np.median(d):+.2f} | {np.mean(d >= -0.1):.0%} | {acc:.1%} | {np.mean([r['K'] >= K_FLOOR for r in rr]):.0%} | "
+                 f"{np.mean([r['S'] for r in rr]):.2f} |")
+    (hdir / "report.md").write_text("\n".join(L) + "\n")
+    print("\n".join(L))
+    print(f"judge spent ${judge.spent:.4f}", file=sys.stderr)
+
+
+# ---------- goal check: who judges goal progress right? (after arm L, 10-29) ----------
+#
+# Gate 0c used Luna's attain as ground truth, but Luna was never validated as a judge of goal progress (pilot: Felix saw
+# the goal branch show its goal 13:1, Luna 0.53). Here Felix rates blind, start vs end with sides shuffled and no scores,
+# every expedition that moved, in the given expedition folders; Jev (attain), Luna (from each folder's check.json) and the
+# VLM (GOAL_JUDGE, both image orders) judge the same pairs. Reported: each judge's agreement with Felix's decisive
+# answers, and Felix's "end shows it" rate per folder. Goals are split, by a keyword rule fixed before rating, into
+# motion goals (hard to see in four snapshots) and static ones.
+DYNAMIC = ("rhythm", "heartbeat", "orbit", "circulat", "swarm", "crawl", "curl", "wave", "swim", "travel", "move",
+           "chase", "rotat", "puls", "drift")
+
+
+def goalcheck(a) -> None:
+    s1 = Path(a.out)
+    gdir = s1 / "goalcheck"
+    (gdir / "images").mkdir(parents=True, exist_ok=True)
+    if a.step == "build":
+        items = []
+        for d in a.dirs.split(","):
+            st = json.loads((s1 / d / a.arm / "state.json").read_text())
+            for tr in st["triggers"]:
+                if tr["history"]:
+                    items.append({"dir": d, "trigger": tr["id"], "start": tr["start"], "end": tr["parent"],
+                                  "sees": tr["goals"][0]["sees"], "push": tr["goals"][0]["push"]})
+        rng = np.random.default_rng(a.seed)
+        tasks = []
+        for k, j in enumerate(rng.permutation(len(items))):
+            x = items[int(j)]
+            start_left = bool(rng.integers(2))
+            for side, rel in (("a", x["start"] if start_left else x["end"]), ("b", x["end"] if start_left else x["start"])):
+                Image.open(s1 / rel).convert("RGB").save(gdir / "images" / f"{k:02d}{side}.png")
+            dyn = any(w in x["push"].lower() for w in DYNAMIC)
+            tasks.append({"id": k, "left": f"{k:02d}a.png", "right": f"{k:02d}b.png", "start_side": "left" if start_left else "right",
+                          "motion_goal": dyn, **x})
+        (gdir / "tasks.json").write_text(json.dumps(tasks, indent=1))
+        print(f"{len(tasks)} pairs ({sum(t['motion_goal'] for t in tasks)} motion goals) -> {gdir}; next: rate, then judge")
+    elif a.step == "rate":
+        from lenia.rating import rate_goal_pairs
+        rate_goal_pairs(gdir, port=a.port)
+    elif a.step == "judge":
+        from lenia.describe import Ask
+        from lenia.prompts import GOAL_JUDGE
+        T = json.loads((gdir / "tasks.json").read_text())
+        judge = _judges(a, s1)
+        pid = lambda t: attain_prompt({"id": goal_id(t["sees"], t["push"]), "sees": t["sees"], "push": t["push"]})
+        qs = []
+        for t in T:
+            E, S = _pic(s1, t["end"]), _pic(s1, t["start"])
+            qs += [Query(pid(t), E, S), Query(pid(t), S, E)]
+        vs = judge.judge_many(qs, desc="goal check: Jev attain")
+        d = _describer(a, s1)
+        asks = []
+        for t in T:
+            E, S = _pic(s1, t["end"]), _pic(s1, t["start"])
+            asks += [Ask(GOAL_JUDGE, [E, S], {"sees": t["sees"], "push": t["push"]}),
+                     Ask(GOAL_JUDGE, [S, E], {"sees": t["sees"], "push": t["push"]})]
+        ans = d.ask_many(asks, desc="goal check: VLM")
+        if any(not v.ok for v in vs):
+            sys.exit("some Jev calls failed (not cached); re-run to retry them")
+        res, miss = {}, 0
+        for n, t in enumerate(T):
+            res[t["id"]] = {"jev": round(0.5 * (vs[2 * n].p_first + 1 - vs[2 * n + 1].p_first), 4), "vlm": None}
+            x, y = ans[2 * n], ans[2 * n + 1]
+            if x.ok and y.ok:                 # a pair the VLM could not answer in both orders is left out, not guessed
+                ch = [str(x.data["choice"]).strip(), str(y.data["choice"]).strip()]
+                res[t["id"]].update(vlm=0.5 * ((ch[0] == "1") + (ch[1] == "2")), vlm_why=[x.data.get("why"), y.data.get("why")])
+            else:
+                miss += 1
+        if miss:
+            print(f"WARNING: the VLM is missing {miss} of {len(T)} pairs (re-run judge later to fill them in)", file=sys.stderr)
+        (gdir / "judges.json").write_text(json.dumps(res, indent=1))
+        print(f"Jev ${judge.spent:.4f}, VLM ${d.spent:.4f}; next: report", file=sys.stderr)
+    else:
+        goalcheck_report(s1, gdir)
+
+
+def goalcheck_report(s1: Path, gdir: Path) -> None:
+    T = json.loads((gdir / "tasks.json").read_text())
+    J = {int(k): v for k, v in json.loads((gdir / "judges.json").read_text()).items()} if (gdir / "judges.json").exists() else {}
+    F = {int(r["id"]): r["answer"] for r in csv.DictReader(open(gdir / "ratings.csv"))} if (gdir / "ratings.csv").exists() else {}
+    luna = {}
+    for d in {t["dir"] for t in T}:
+        cj = s1 / d / "L" / "check.json"
+        if cj.exists():
+            for tid, r in json.loads(cj.read_text()).items():
+                luna[(d, tid)] = r["attain"]
+    rows = []
+    for t in T:
+        f = F.get(t["id"])
+        fe = None if f in (None, "neither") else (f != t["start_side"])          # Felix: the end shows it
+        rows.append({**t, "felix": f, "felix_end": fe, "jev": J.get(t["id"], {}).get("jev"),
+                     "vlm": J.get(t["id"], {}).get("vlm"), "luna": luna.get((t["dir"], t["trigger"]))})
+    L = ["# Goal check: start vs end of the arm L expeditions that moved\n",
+         "Felix blind (sides shuffled, no scores); judges: P(the end shows the wanted change more clearly), both orders.\n",
+         "| folder | pairs | Felix: end / start / neither |", "|---|---|---|"]
+    for d in sorted({r["dir"] for r in rows}):
+        rr = [r for r in rows if r["dir"] == d and r["felix"]]
+        L.append(f"| {d} | {len(rr)} | {sum(r['felix_end'] is True for r in rr)} / {sum(r['felix_end'] is False for r in rr)} / "
+                 f"{sum(r['felix'] == 'neither' for r in rr)} |")
+    dec = [r for r in rows if r["felix_end"] is not None]
+    L += ["", f"Agreement with Felix on his {len(dec)} decisive pairs (judge P > 0.5 = end):", "",
+          "| judge | agree | mean P when Felix says end | mean P when Felix says start |", "|---|---|---|---|"]
+    for j in ("jev", "luna", "vlm"):
+        dd = [r for r in dec if r[j] is not None]
+        if dd:
+            ag = sum((r[j] > 0.5) == r["felix_end"] for r in dd)
+            pe = [r[j] for r in dd if r["felix_end"]]
+            ps = [r[j] for r in dd if not r["felix_end"]]
+            L.append(f"| {j} | {ag}/{len(dd)} | {np.mean(pe) if pe else float('nan'):.2f} | {np.mean(ps) if ps else float('nan'):.2f} |")
+    for lab, m in (("motion goals", True), ("static goals", False)):
+        rr = [r for r in rows if r["motion_goal"] == m and r["felix"]]
+        if rr:
+            L.append(f"\n{lab}: Felix end {sum(r['felix_end'] is True for r in rr)}, start {sum(r['felix_end'] is False for r in rr)}, "
+                     f"neither {sum(r['felix'] == 'neither' for r in rr)}")
+    L += ["", "| folder | trigger | goal | Felix | Jev | Luna | VLM |", "|---|---|---|---|---|---|---|"]
+    f2 = lambda v: "-" if v is None else f"{v:.2f}"
+    for r in sorted(rows, key=lambda r: (r["dir"], r["trigger"])):
+        fl = {True: "end", False: "start", None: r["felix"] or "-"}[r["felix_end"]]
+        L.append(f"| {r['dir']} | {r['trigger']} | {r['push']}{' (motion)' if r['motion_goal'] else ''} | {fl} | {f2(r['jev'])} | "
+                 f"{f2(r['luna'])} | {f2(r['vlm'])} |")
+    (gdir / "report.md").write_text("\n".join(L) + "\n")
+    print("\n".join(L))
+
+
 def _font(size: int):
     try:
         return ImageFont.load_default(size=size)
@@ -671,11 +872,37 @@ def main() -> None:
     e.add_argument("--max-vlm-usd", type=float, default=3.0, help="hard cap on the --out VLM cache's total spend")
     for k in ("size", "warmup", "render", "gap", "sim_batch"):
         e.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
+    h = sub.add_parser("heritability")
+    h.add_argument("--run", required=True)
+    h.add_argument("--out", required=True)
+    h.add_argument("--arms", default="L,N")
+    h.add_argument("--evals", default=None, help="simulation cache folder (default <out>/evals; a local disk is faster on Colab)")
+    h.add_argument("--backend", default="numpy")
+    h.add_argument("--judge", default="jev")
+    h.add_argument("--config", default=None)
+    h.add_argument("--seed", type=int, default=0)
+    h.add_argument("--mutants", type=int, default=16)
+    h.add_argument("--max-usd", type=float, default=6.0)
+    for k in ("size", "warmup", "render", "gap", "sim_batch"):
+        h.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
+    g = sub.add_parser("goalcheck")
+    g.add_argument("step", choices=["build", "rate", "judge", "report"])
+    g.add_argument("--out", required=True)
+    g.add_argument("--arm", default="L")
+    g.add_argument("--dirs", default="exp-v2,arms", help="expedition folders to pool (v2, v1)")
+    g.add_argument("--seed", type=int, default=0)
+    g.add_argument("--port", type=int, default=8772)
+    g.add_argument("--config", default=None)
+    g.add_argument("--judge", default="jev")
+    g.add_argument("--vlm", default="gemini-pro")
+    g.add_argument("--max-usd", type=float, default=6.0)
+    g.add_argument("--max-vlm-usd", type=float, default=3.0)
     c.add_argument("--max-luna-usd", type=float, default=0.5)
     c.add_argument("--luna", default="luna", help="the held-out judge (fake for dry runs)")
     c.add_argument("--dir", default=None, help=f"the expedition folder (default {EXP_DIR}; arms = v1)")
     a = ap.parse_args()
-    {"triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check}[a.cmd](a)
+    {"triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check, "goalcheck": goalcheck,
+     "heritability": heritability}[a.cmd](a)
 
 
 if __name__ == "__main__":

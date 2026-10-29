@@ -63,18 +63,19 @@ def _twelfths(x: float) -> float:
     return round(min(1.0, max(0.0, x)) * 12) / 12
 
 
-def mutate_kernel(k: Kernel, rng, multi: bool, scale: float = 1.0) -> Kernel:
+def mutate_kernel(k: Kernel, rng, multi: bool, scale: float = 1.0, struct: float = 1.0) -> Kernel:
     k = copy.deepcopy(k)
     k.m = float(np.clip(k.m + rng.normal(0, 0.01 * scale), 0.05, 0.6))
     k.s = float(np.clip(k.s * np.exp(rng.normal(0, 0.08 * scale)), 0.003, 0.2))
     b = list(k.b)
     u = rng.random()
-    if u < 0.15:                                            # nudge one ring by a twelfth
+    # struct scales the chance of these discrete ring edits (1 = as always; 0 = continuous parameters only)
+    if u < 0.15 * struct:                                   # nudge one ring by a twelfth
         i = int(rng.integers(len(b)))
         b[i] = _twelfths(b[i] + rng.choice([-1, 1]) / 12)
-    elif u < 0.20 and len(b) < 3:                           # add a ring
+    elif u < 0.20 * struct and len(b) < 3:                  # add a ring
         b.insert(int(rng.integers(len(b) + 1)), _twelfths(rng.random()))
-    elif u < 0.25 and len(b) > 1:                           # drop a ring
+    elif u < 0.25 * struct and len(b) > 1:                  # drop a ring
         b.pop(int(rng.integers(len(b))))
     if max(b) < 1:
         b[int(np.argmax(b))] = 1.0
@@ -85,9 +86,9 @@ def mutate_kernel(k: Kernel, rng, multi: bool, scale: float = 1.0) -> Kernel:
     return k
 
 
-def mutate(rule: Rule, rng, scale: float = 1.0) -> Rule:
+def mutate(rule: Rule, rng, scale: float = 1.0, struct: float = 1.0) -> Rule:
     multi = len(rule.kernels) > 1
-    ks = [mutate_kernel(k, rng, multi, scale) if (not multi or rng.random() < 0.5) else copy.deepcopy(k)
+    ks = [mutate_kernel(k, rng, multi, scale, struct) if (not multi or rng.random() < 0.5) else copy.deepcopy(k)
           for k in rule.kernels]
     return Rule(ks, R=rule.R, T=rule.T, channels=rule.channels, kn=rule.kn, gn=rule.gn,
                 flow=rule.flow, beta=rule.beta)

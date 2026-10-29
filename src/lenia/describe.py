@@ -160,6 +160,10 @@ class Describer:
                 raise BudgetError(f"[{desc} {self.name}] spent ${so_far:.2f}; {len(todo)} more calls (~${est:.2f}) would pass "
                                   f"the cap of ${self.cap:.2f}. Nothing was called; re-run with a higher cap.")
         res = {}
+        if todo and os.environ.get("LENIA_VLM_CACHE_ONLY"):           # answer from the cache only; make no calls
+            self.log(f"[{desc} {self.name}] LENIA_VLM_CACHE_ONLY: {len(todo)} uncached asks left unanswered")
+            res = {keys[i]: Answer(None, "not cached (LENIA_VLM_CACHE_ONLY)") for i in todo}
+            todo = []
         if todo:
             workers = 1 if self.backend == "fake" else int(self.cfg.get("max_workers", 4))
             with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -173,7 +177,7 @@ class Describer:
                     elif n <= 3:
                         self.log(f"[{desc} {self.name}] failed call: {a.raw[:300]}")
                     res[keys[i]] = a
-        if len(res) >= 3 and not any(a.ok for a in res.values()):
+        if len(res) >= 3 and not any(a.ok for a in res.values()) and not os.environ.get("LENIA_VLM_CACHE_ONLY"):
             raise FatalAPIError(f"[{desc} {self.name}] all {len(res)} new calls failed; first: {next(iter(res.values())).raw[:300]}")
         final = [v if v is not None else res[k] for v, k in zip(out, keys)]
         n_fail = sum(not a.ok for a in final)
@@ -206,8 +210,13 @@ class Describer:
         return n_in * float(self.cfg.get("usd_per_m_input", 0)) / 1e6 + n_out * float(self.cfg.get("usd_per_m_output", 0)) / 1e6
 
     def _vertex(self, system: str, user: str, pngs: list):
-        from google import genai                               # uv add google-genai
-        from google.genai import types
+        if os.environ.get("LENIA_VERTEX_REST"):                 # force the REST path (to test it where the SDK exists)
+            return self._vertex_rest(system, user, pngs)
+        try:
+            from google import genai                           # the SDK where installed (the Mac: extra `vertex`)
+            from google.genai import types
+        except ImportError:                                    # Colab: plain REST with its preinstalled google-auth
+            return self._vertex_rest(system, user, pngs)
         if self._client is None:
             project = self.cfg.get("project") or os.environ.get("GOOGLE_CLOUD_PROJECT")
             if not project:
@@ -224,17 +233,79 @@ class Describer:
                                            max_output_tokens=self.cfg.get("max_output_tokens"),
                                            response_mime_type="application/json", thinking_config=tcfg)
         parts = [types.Part.from_bytes(data=b, mime_type="image/png") for b in pngs] + [user]
-        try:
-            r = self._client.models.generate_content(model=self.model, contents=parts, config=conf)
-        except Exception as e:
-            code = getattr(e, "code", None)
-            if code in FATAL_STATUS or code == 404:
-                raise FatalAPIError(f"Vertex {code}: {e}")
-            raise
+        for attempt in range(int(self.cfg.get("max_retries", 5)) + 1):       # 429 (per-minute quota) and 5xx: back off
+            try:
+                r = self._client.models.generate_content(model=self.model, contents=parts, config=conf)
+                break
+            except Exception as e:
+                code = getattr(e, "code", None)
+                if code in FATAL_STATUS or code == 404:
+                    raise FatalAPIError(f"Vertex {code}: {e}")
+                if code not in RETRY_STATUS or attempt == int(self.cfg.get("max_retries", 5)):
+                    raise
+                time.sleep(min(60.0, 4 * 2 ** attempt))
         u = r.usage_metadata
         n_in, n_out, n_th = (getattr(u, k, 0) or 0 for k in ("prompt_token_count", "candidates_token_count", "thoughts_token_count"))
         usage = {"input": n_in, "output": n_out, "thinking": n_th}
         return r.text, usage, self._price(n_in, n_out + n_th), getattr(r, "model_version", None)
+
+    def _vertex_rest(self, system: str, user: str, pngs: list):
+        """Vertex generateContent over HTTPS with Application Default Credentials (google-auth only), for machines without
+        the google-genai SDK (Colab, where installing it upgrades the google-auth that Colab pins). Same request as the
+        SDK path, so answers share the cache."""
+        import base64
+        project = self.cfg.get("project") or os.environ.get("GOOGLE_CLOUD_PROJECT")
+        if not project:
+            raise FatalAPIError("set GOOGLE_CLOUD_PROJECT in .env (or `project:` under this VLM in the config)")
+        loc = self.cfg.get("location") or os.environ.get("GOOGLE_CLOUD_LOCATION", "global")
+        if self._client is None or not self._client.valid:
+            import google.auth                                 # preinstalled on Colab; a dependency of google-genai
+            import google.auth.transport.requests
+            if self._client is None:
+                self._client, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+            self._client.refresh(google.auth.transport.requests.Request())
+        host = "aiplatform.googleapis.com" if loc == "global" else f"{loc}-aiplatform.googleapis.com"
+        url = f"https://{host}/v1/projects/{project}/locations/{loc}/publishers/google/models/{self.model}:generateContent"
+        gen = {"responseMimeType": "application/json"}
+        if self.cfg.get("temperature") is not None:
+            gen["temperature"] = self.cfg["temperature"]
+        if self.cfg.get("max_output_tokens"):
+            gen["maxOutputTokens"] = self.cfg["max_output_tokens"]
+        th = self.cfg.get("thinking") or {}
+        if "level" in th:
+            gen["thinkingConfig"] = {"thinkingLevel": str(th["level"]).upper()}
+        elif "budget" in th:
+            gen["thinkingConfig"] = {"thinkingBudget": int(th["budget"])}
+        body = {"systemInstruction": {"parts": [{"text": system}]},
+                "contents": [{"role": "user", "parts": [{"inlineData": {"mimeType": "image/png", "data": base64.b64encode(b).decode()}}
+                                                        for b in pngs] + [{"text": user}]}],
+                "generationConfig": gen}
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {self._client.token}"}
+        if os.environ.get("GOOGLE_CLOUD_QUOTA_PROJECT"):
+            headers["x-goog-user-project"] = os.environ["GOOGLE_CLOUD_QUOTA_PROJECT"]
+        data, last = None, ""
+        for attempt in range(int(self.cfg.get("max_retries", 5)) + 1):
+            req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers=headers)
+            try:
+                with urllib.request.urlopen(req, timeout=float(self.cfg.get("timeout_s", 180))) as r:
+                    data = json.loads(r.read().decode())
+                break
+            except urllib.error.HTTPError as e:
+                last = f"Vertex HTTP {e.code}: {e.read().decode(errors='replace')[:500]}"
+                if e.code in FATAL_STATUS or e.code == 404:
+                    raise FatalAPIError(last)
+                if e.code not in RETRY_STATUS:
+                    raise RuntimeError(last)
+            except Exception as e:
+                last = f"{type(e).__name__}: {e}"
+            time.sleep(min(60.0, 4 * 2 ** attempt))
+        if data is None:
+            raise RuntimeError(last)
+        parts = ((data.get("candidates") or [{}])[0].get("content") or {}).get("parts") or []
+        text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+        u = data.get("usageMetadata") or {}
+        n_in, n_out, n_th = (int(u.get(k) or 0) for k in ("promptTokenCount", "candidatesTokenCount", "thoughtsTokenCount"))
+        return text, {"input": n_in, "output": n_out, "thinking": n_th}, self._price(n_in, n_out + n_th), data.get("modelVersion")
 
     def _openrouter(self, system: str, user: str, pngs: list):
         import base64

@@ -36,6 +36,8 @@ vlms:                                  # generative VLMs (lenia.describe); scrip
     temperature: 1.0
     max_output_tokens: 4096
     est_cost_per_call_usd: 0.015     # measured 0.0128 per namer call (5 pictures), 10-29
+    max_workers: 2                     # Vertex 429s (shared capacity for new models): fewer in parallel,
+    max_retries: 8                     # and back off for up to ~6 minutes (10-29)
   gemini-pro-3.1:
     backend: vertex
     model: gemini-3.1-pro-preview
@@ -45,6 +47,8 @@ vlms:                                  # generative VLMs (lenia.describe); scrip
     temperature: 1.0
     max_output_tokens: 4096
     est_cost_per_call_usd: 0.015     # assumed like gemini-pro
+    max_workers: 2                     # Vertex 429s (shared capacity for new models): fewer in parallel,
+    max_retries: 8                     # and back off for up to ~6 minutes (10-29)
   gemini-flash:
     backend: vertex
     model: gemini-3.8-flash
@@ -54,6 +58,8 @@ vlms:                                  # generative VLMs (lenia.describe); scrip
     temperature: 1.0
     max_output_tokens: 4096
     est_cost_per_call_usd: 0.006     # measured 0.0048 per namer call, 10-29
+    max_workers: 2                     # Vertex 429s (shared capacity for new models): fewer in parallel,
+    max_retries: 8                     # and back off for up to ~6 minutes (10-29)
   qwen-8b:
     backend: openrouter                # cost comes from OpenRouter's usage report
     model: qwen/qwen3-vl-8b-instruct

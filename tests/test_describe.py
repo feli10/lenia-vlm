@@ -90,6 +90,46 @@ def test_openrouter_request():
     assert [p["type"] for p in c] == ["image_url"] * 5 + ["text"] and b["messages"][0]["role"] == "system"
 
 
+def test_vertex_rest_request():
+    """The REST path (no google-genai SDK): request body, thought parts skipped, usage and cost."""
+    import types as _t
+    seen = {}
+
+    class R:
+        def __init__(self, b): self.b = b
+        def __enter__(self): return self
+        def __exit__(self, *x): pass
+        def read(self): return self.b
+
+    import urllib.request
+    old = urllib.request.urlopen
+
+    def fake_open(req, timeout=None):
+        seen["url"], seen["body"], seen["auth"] = req.full_url, json.loads(req.data.decode()), req.headers.get("Authorization")
+        return R(json.dumps({"modelVersion": "gemini-x", "candidates": [{"content": {"parts": [
+            {"text": "thinking...", "thought": True}, {"text": '{"sees": "s", "push": "make p"}'}]}}],
+            "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 20, "thoughtsTokenCount": 5}}).encode())
+    urllib.request.urlopen = fake_open
+    os.environ["GOOGLE_CLOUD_PROJECT"] = "proj-x"
+    try:
+        with tempfile.TemporaryDirectory() as d:
+            dsc = Describer("v", {"backend": "vertex", "model": "gemini-x", "thinking": {"level": "low"}, "temperature": 1.0,
+                                  "max_output_tokens": 100, "usd_per_m_input": 2.0, "usd_per_m_output": 10.0},
+                            Path(d) / "c.sqlite", log=lambda m: None)
+            dsc._client = _t.SimpleNamespace(valid=True, token="tok")        # stands in for google-auth credentials
+            text, usage, cost, ver = dsc._vertex_rest("sys", "user text", [b"png1", b"png2"])
+    finally:
+        urllib.request.urlopen = old
+    assert text == '{"sees": "s", "push": "make p"}' and ver == "gemini-x"
+    assert usage == {"input": 1000, "output": 20, "thinking": 5} and abs(cost - (1000 * 2 + 25 * 10) / 1e6) < 1e-12
+    assert seen["url"] == ("https://aiplatform.googleapis.com/v1/projects/proj-x/locations/global/publishers/google/models/"
+                           "gemini-x:generateContent") and seen["auth"] == "Bearer tok"
+    b = seen["body"]
+    assert b["systemInstruction"]["parts"][0]["text"] == "sys" and b["generationConfig"]["thinkingConfig"] == {"thinkingLevel": "LOW"}
+    parts = b["contents"][0]["parts"]
+    assert [("inlineData" in p) for p in parts] == [True, True, False] and parts[-1]["text"] == "user text"
+
+
 if __name__ == "__main__":
     for name, f in list(globals().items()):
         if name.startswith("test_") and callable(f):

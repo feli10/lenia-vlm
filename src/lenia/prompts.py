@@ -196,6 +196,18 @@ GEN.setdefault(REVIEW_S, {
     "fields": ["decision", "sees", "push", "why"]})
 
 
+# Goal-progress judge for the generative VLM (goal check after arm L, 10-29): the attain question, asked of Gemini as a
+# third judge beside Jev and Luna, to see which agrees with Felix's blind ratings.
+GOAL_JUDGE = "goal_judge_v1"
+GEN.setdefault(GOAL_JUDGE, {
+    "system": _GEN_SYSTEM + " Here you compare two worlds of one lineage against a goal.",
+    "user": ("Image 1 and Image 2 are two worlds; one descends from the other. " + _FRAMES + "\n\nThe lineage started "
+             "from a world that showed this: {sees}\nThis change was wanted: {push}\n\nWhich image shows this change "
+             "more clearly? Judge only the change asked for, not which world is nicer.\n"
+             "Return {\"choice\": \"1\" or \"2\", \"why\": one short sentence}."),
+    "fields": ["choice", "why"]})
+
+
 # ---------- lookup ----------
 
 def get_prompt(prompt_id: str) -> dict[str, str]:
