@@ -72,3 +72,57 @@ class Embedder:
                 e = self.fwd(xt).float().cpu().numpy()
             out.append(e.reshape(len(views), nv * e.shape[-1]))
         return np.concatenate(out) if out else np.zeros((0, 0), np.float32)
+
+
+class ClipScorer:
+    """Text-target scoring with CLIP (OpenAI ViT-B/32 via `transformers`, preinstalled on Colab; the model ASAL used):
+    score(images, prompt) = cosine similarity between each image's embedding and the prompt's. model="fake" needs
+    no PyTorch (tests and offline dry runs): fixed random projections of colour statistics and of the prompt's hash."""
+
+    def __init__(self, model: str = "openai/clip-vit-base-patch32", device: str | None = None):
+        self.model = model
+        self._text = {}
+        if model == "fake":
+            self.device = "cpu"
+            self._P = np.random.default_rng(0).normal(size=(12, 32))
+            return
+        import torch
+        from transformers import CLIPModel, CLIPProcessor
+        self.device = device or _device()
+        self.m = CLIPModel.from_pretrained(model).to(self.device).eval()
+        self.proc = CLIPProcessor.from_pretrained(model)
+        self.torch = torch
+
+    def text(self, prompt: str) -> np.ndarray:
+        if prompt not in self._text:
+            if self.model == "fake":
+                import hashlib
+                v = np.random.default_rng(int(hashlib.sha1(prompt.encode()).hexdigest()[:8], 16)).normal(size=32)
+            else:
+                with self.torch.no_grad():
+                    t = self.proc(text=[prompt], return_tensors="pt", padding=True).to(self.device)
+                    v = self.m.get_text_features(**t)[0].float().cpu().numpy()
+            self._text[prompt] = v / np.linalg.norm(v)
+        return self._text[prompt]
+
+    def images(self, images: list, batch: int = 64) -> np.ndarray:
+        """list of (H, W, 3) uint8 arrays -> (n, d) unit vectors."""
+        if self.model == "fake":
+            f = np.array([np.concatenate([np.asarray(im, np.float32).reshape(-1, 3).mean(0) / 255,
+                                          np.asarray(im, np.float32).reshape(-1, 3).std(0) / 255,
+                                          (np.asarray(im, np.float32).reshape(-1, 3) > 128).mean(0),
+                                          np.asarray(im, np.float32)[::8, ::8].reshape(-1, 3).max(0) / 255]) for im in images])
+            v = f @ self._P
+        else:
+            from PIL import Image
+            out = []
+            for k in range(0, len(images), batch):
+                x = self.proc(images=[Image.fromarray(np.asarray(im, np.uint8)) for im in images[k:k + batch]],
+                              return_tensors="pt").to(self.device)
+                with self.torch.no_grad():
+                    out.append(self.m.get_image_features(**x).float().cpu().numpy())
+            v = np.concatenate(out) if out else np.zeros((0, 512), np.float32)
+        return v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-9)
+
+    def score(self, images: list, prompt: str) -> np.ndarray:
+        return self.images(images) @ self.text(prompt) if images else np.zeros(0)
