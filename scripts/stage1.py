@@ -192,10 +192,20 @@ def typical(run: Path, trigger: dict, k: int = 4, seed: int = 0) -> list:
 # fixed-reference guarded expedition, arms as treatments on identical starts with shared mutation randomness, the single
 # scheduled review, and refine vs switch as separate options.
 
+# v3 (10-30, after the heritability check, runs/stage1-s0/heritability): children of a v2 end parent kept little of its
+# progress (mutation 3.0: child goal 0.46 vs parent 0.85), and the "beat the parent's score" bar stalled every
+# expedition, because the parent's score was the best of 32 and so overrated (even the gentlest children sat ~0.15
+# below it, flattening as mutation shrank). v3: gentle expedition mutation (scale 0.3, no ring edits: the most
+# heritable setting measured; the base search keeps exploring at 3.0), and comma selection, the (1,lambda)-ES
+# (Rechenberg, Schwefel): every step the best child that passes the complexity floor replaces the parent, whatever the
+# parent's score. Progress is the mean goal score of each step's children (not inflated by selection); the best world
+# found is kept for the record. v2 results stay in exp-v2/ (L, N), v1 in arms/ (L).
+
 ARMS = ("L", "N", "NR", "NS")
 EXP_STEPS, MUTANTS, REVIEW_AT = 10, 32, 5
 MARGIN, K_FLOOR = 0.03, 0.45
-EXP_DIR = "exp-v2"                        # arms/ holds v1 (arm L only), kept as the record of why v1 was replaced
+MUT_SCALE, STRUCT = 0.3, 0.0             # expedition mutation (the base search uses its own mut_scale, 3.0, with ring edits)
+EXP_DIR = "exp-v3"
 
 
 def eval_settings(run: Path, a) -> argparse.Namespace:
@@ -211,9 +221,10 @@ def eval_settings(run: Path, a) -> argparse.Namespace:
 class Evals:
     """Simulation cache: a rule's picture and descriptors under the eval settings, keyed by the rule. Exact (the
     simulation is deterministic per rule), so replayed steps need no GPU."""
-    def __init__(self, folder: Path, ea):
+    def __init__(self, folder: Path, ea, keep: Path | None = None):
         import hashlib
         self.dir = folder
+        self.keep = keep                     # the run folder's evals/: accepted worlds are copied there (they outlive a session)
         folder.mkdir(parents=True, exist_ok=True)
         self.ea = ea
         self.tag = json.dumps({k: getattr(ea, k) for k in ("size", "R", "warmup", "render", "gap", "start_seed")})
@@ -229,7 +240,8 @@ class Evals:
         for i, k in enumerate(keys):
             if (self.dir / f"{k}.json").exists() and (self.dir / f"{k}.png").exists():
                 d = json.loads((self.dir / f"{k}.json").read_text())
-                out[i] = {**d, "pic": np.asarray(Image.open(self.dir / f"{k}.png").convert("RGB")), "image": f"evals/{k}.png"}
+                out[i] = {**d, "pic": np.asarray(Image.open(self.dir / f"{k}.png").convert("RGB")), "image": f"evals/{k}.png",
+                          "key": k}
             elif k not in {keys[j] for j in todo}:
                 todo.append(i)
         if todo:
@@ -239,12 +251,22 @@ class Evals:
                 Image.fromarray(e["pic"]).save(self.dir / f"{k}.png")
                 d = {x: e[x] for x in ("bodies", "motion", "texture", "coverage")}
                 (self.dir / f"{k}.json").write_text(json.dumps(d))
-                out[i] = {**d, "pic": e["pic"], "image": f"evals/{k}.png"}
+                out[i] = {**d, "pic": e["pic"], "image": f"evals/{k}.png", "key": k}
         for i, k in enumerate(keys):                          # duplicates within the batch
             if out[i] is None:
                 j = keys.index(k)
                 out[i] = out[j]
         return out
+
+    def persist(self, e: dict) -> None:
+        """Copy an accepted world's picture and descriptors into the run folder's evals/ (state.json points there)."""
+        if self.keep is None or self.keep == self.dir:
+            return
+        import shutil
+        self.keep.mkdir(parents=True, exist_ok=True)
+        for ext in ("png", "json"):
+            if not (self.keep / f"{e['key']}.{ext}").exists():
+                shutil.copy(self.dir / f"{e['key']}.{ext}", self.keep / f"{e['key']}.{ext}")
 
 
 def goal_id(sees: str, push: str) -> str:
@@ -369,10 +391,13 @@ def do_review(a, s1: Path, st: dict, judge) -> None:
     asks = []
     for tr in st["triggers"]:
         g = tr["goals"][-1]
-        prog = (f"{tr['accepted']} of {REVIEW_AT} generations produced an accepted child. The judge's goal score of the "
-                f"current parent against the start world is {tr['g']:.2f} (0.5 = no change toward the goal, 1 = clearly "
-                f"further), and its complexity against the start is {tr['k']:.2f} (0.5 = as complex as the start); "
-                f"{tr['k_rejected']} mutants that moved toward the goal were rejected because they lost complexity.")
+        cm = [c["mean_goal"] for c in tr.get("child_mean", [])]
+        trend = (f"the average mutant's goal score went from {cm[0]:.2f} in generation 1 to {cm[-1]:.2f} in generation "
+                 f"{len(cm)}" if len(cm) > 1 else "")
+        prog = (f"The judge's goal score of the current parent against the start world is {tr['g']:.2f} (0.5 = no change "
+                f"toward the goal, 1 = clearly further); {trend}. The current parent's complexity against the start is "
+                f"{tr['k']:.2f} (0.5 = as complex as the start); {tr['k_rejected']} mutants that moved toward the goal "
+                "were rejected because they lost complexity.")
         asks.append(Ask(pid, [_pic(s1, tr["start"]), _pic(s1, tr["parent"])],
                         {"mutants": st["mutants"], "gens": REVIEW_AT, "total": st["steps"], "left": st["steps"] - REVIEW_AT,
                          "sees": g["sees"], "push": g["push"], "progress": prog}))
@@ -411,26 +436,34 @@ def do_review(a, s1: Path, st: dict, judge) -> None:
     st["reviewed"] = True
 
 
-def same_platform(evals: "Evals", st: dict, ea) -> None:
-    """Shared mutation randomness only holds if every arm draws bit-identical mutants. np.exp differs in the last bit
-    between x86 (Colab) and ARM (Mac), and NumPy may change between Colab images. If an earlier run already simulated
-    the first trigger's first step-1 mutants, this arm's must be the same rules (the same simulation-cache keys)."""
-    if not any(evals.dir.glob("*.json")):
-        return
-    tr = st["triggers"][0]
-    rng = np.random.default_rng([st["seed"], tr["index"], 1])
-    par = Rule.from_dict(tr["start_rule"])
-    keys = []
-    for _ in range(min(8, st["mutants"])):            # every run so far drew at least 8 mutants a step
-        m = mutate(par, rng, ea.mut_scale)
+def mutants_of(par: Rule, rng, n: int, ea, scale: float = MUT_SCALE, struct: float = STRUCT) -> list:
+    """n expedition mutants of a parent: lenia.mace.mutate at the expedition's strength, beta jitter scaled with it."""
+    out = []
+    for _ in range(n):
+        m = mutate(par, rng, scale, struct)
         m.flow = "mace"
-        m.beta = float(np.clip(par.beta * np.exp(rng.normal(0, 0.1)), 0.5, 4.0))
-        keys.append(evals.key(m))
-    missing = [k for k in keys if not (evals.dir / f"{k}.json").exists()]
-    if missing:
-        sys.exit(f"{len(missing)}/{len(keys)} of {tr['id']}'s first step-1 mutants are not the ones an earlier run drew: this "
-                 "machine computes mutations differently (another CPU type or NumPy version), so the arms would not share "
-                 "mutation randomness. Run every arm of a seed in the same environment (Colab).")
+        m.beta = float(np.clip(par.beta * np.exp(rng.normal(0, 0.1 * min(1.0, scale / 3.0))), 0.5, 4.0))
+        out.append(m)
+    return out
+
+
+def same_platform(s1: Path, evals: "Evals", st: dict, ea) -> None:
+    """Shared mutation randomness only holds if every arm draws bit-identical mutants (np.exp differs in the last bit
+    between x86 and ARM; NumPy may change between Colab images). The first arm records the first trigger's first 8
+    step-1 mutants (their simulation-cache keys) in <out>/mutation_fingerprint.json; every later arm must match."""
+    import hashlib
+    tr = st["triggers"][0]
+    ms = mutants_of(Rule.from_dict(tr["start_rule"]), np.random.default_rng([st["seed"], tr["index"], 1]), 8, ea)
+    fp = hashlib.sha1("".join(evals.key(m) for m in ms).encode()).hexdigest()[:16]
+    tag = f"{EXP_DIR} scale={MUT_SCALE} struct={STRUCT}"
+    f = s1 / "mutation_fingerprint.json"
+    known = json.loads(f.read_text()) if f.exists() else {}
+    if tag not in known:
+        known[tag] = fp
+        f.write_text(json.dumps(known, indent=1))
+    elif known[tag] != fp:
+        sys.exit("this machine draws different mutants than the arms already run (another CPU type or NumPy version), so "
+                 "the arms would not share mutation randomness. Run every arm of a seed in the same environment (Colab).")
 
 
 def expedition(a) -> None:
@@ -450,10 +483,10 @@ def expedition(a) -> None:
         for tr in st["triggers"]:
             g = tr["goals"][0]
             print(f"{tr['id']}: {g['sees']} -> {g['push']}", file=sys.stderr)
-    evals = Evals(s1 / "evals", ea)
+    evals = Evals(Path(a.evals) if a.evals else s1 / "evals", ea, keep=s1 / "evals")
     M = st["mutants"]
     if st["step"] == 0:
-        same_platform(evals, st, ea)
+        same_platform(s1, evals, st, ea)
     fh = open(adir / "duels.csv", "a", newline="")
     log = csv.writer(fh)
     if fh.tell() == 0:
@@ -469,11 +502,7 @@ def expedition(a) -> None:
         rules, owner = [], []
         for tr in st["triggers"]:
             rng = np.random.default_rng([st["seed"], tr["index"], step])      # the same draws in every arm
-            par = Rule.from_dict(tr["parent_rule"])
-            for _ in range(M):
-                m = mutate(par, rng, ea.mut_scale)
-                m.flow = "mace"
-                m.beta = float(np.clip(par.beta * np.exp(rng.normal(0, 0.1)), 0.5, 4.0))
+            for m in mutants_of(Rule.from_dict(tr["parent_rule"]), rng, M, ea):
                 rules.append(m)
                 owner.append(tr["index"])
         ev = evals.get_many(rules)
@@ -498,7 +527,7 @@ def expedition(a) -> None:
         vs = judge.judge_multi(mq, desc=f"{a.arm} step {step}")
         if any(not all(v.ok for v in vv) for vv in vs):
             sys.exit("some judge requests failed (not cached); re-run to retry them (the step restarts)")
-        best, pos = {}, 0
+        best, pos, gs = {}, 0, {}
         both = lambda x, y, q: 0.5 * (x[q].p_first + 1 - y[q].p_first)
         for i, j, lay in meta:
             if lay == 1:
@@ -510,21 +539,28 @@ def expedition(a) -> None:
                 K, S = both(vs[pos + 2], vs[pos + 3], 0), both(vs[pos + 2], vs[pos + 3], 1)
                 pos += 4
             tr = byi[i]
-            moves = G >= tr["g"] + MARGIN
-            acc = moves and K >= K_FLOOR
-            if moves and not acc and step <= REVIEW_AT:
+            gs.setdefault(i, []).append(G)
+            acc = K >= K_FLOOR                 # comma selection: the best child passing the floor replaces the parent
+            if not acc and G >= tr["g"] + MARGIN and step <= REVIEW_AT:
                 tr["k_rejected"] += 1
-            if acc and (G, K) > best.get(i, (0.0, 0.0, None, None))[:2]:
+            if acc and (G, K) > best.get(i, (-1.0, 0.0, None, None))[:2]:
                 best[i] = (G, K, j, S)
             log.writerow([step, tr["id"], j % M, round(ev[j]["texture"], 4), round(G, 4), round(K, 4), round(S, 4), int(acc),
                           tr["goals"][-1]["id"]])
+        for i, tr in byi.items():               # the unselected progress signal: this step's children's mean goal score
+            if gs.get(i):
+                tr.setdefault("child_mean", []).append({"step": step, "mean_goal": round(float(np.mean(gs[i])), 4), "n": len(gs[i])})
         for i, (G, K, j, S) in best.items():
             tr = byi[i]
+            evals.persist(ev[j])
             tr["parent_rule"], tr["parent"] = rules[j].to_dict(), ev[j]["image"]
             tr["g"], tr["k"], tr["s"] = round(G, 4), round(K, 4), round(S, 4)
             if step <= REVIEW_AT:
                 tr["accepted"] += 1
+            if tr["g"] > tr.get("best", {}).get("g", -1.0):
+                tr["best"] = {"step": step, "image": ev[j]["image"], "g": tr["g"], "k": tr["k"], "s": tr["s"]}
             h = {"step": step, "image": ev[j]["image"], "goal_score": tr["g"], "complexity": tr["k"], "surprise": tr["s"],
+                 "child_mean_goal": tr["child_mean"][-1]["mean_goal"],
                  "goal": tr["goals"][-1]["id"], "bodies": ev[j]["bodies"], "motion": round(ev[j]["motion"], 4)}
             tr["history"].append(h)
             trace.write(json.dumps({"arm": a.arm, "trigger": tr["id"], **h, "rule": rules[j].to_dict()}) + "\n")
@@ -532,7 +568,9 @@ def expedition(a) -> None:
         QD.save_state(adir, st)
         fh.flush()
         trace.flush()
-        print(f"{a.arm} step {step}: {len(best)}/{len(byi)} triggers took a child, {len(mq)} requests, "
+        cm = [np.mean(v) for v in gs.values() if v]
+        print(f"{a.arm} step {step}: children's mean goal score {np.mean(cm) if cm else float('nan'):.2f}, "
+              f"{len(best)}/{len(byi)} triggers moved, {len(mq)} requests, "
               f"{time.time() - t0:.0f}s, judge spent ${judge.spent:.4f} (cache ${judge.cache.total_cost():.2f})", file=sys.stderr)
     fh.close()
     trace.close()
@@ -583,6 +621,14 @@ def check(a) -> None:
         L.append(f"| {tr['id']} | {len(tr['history'])} | {g['sees']} -> {g['push']} | {r['attain']:.2f} | {r['complexity']:.2f} | "
                  f"{r['surprise']:.2f} | {ch} |")
     L.append(f"\n**Means:** attain {m['attain']:.2f}, complexity {m['complexity']:.2f}, surprise {m['surprise']:.2f}.")
+    cms = [tr["child_mean"] for tr in st["triggers"] if tr.get("child_mean")]
+    if cms:                                  # v3: the unselected progress signal (Jev, goal vs start)
+        by = {}
+        for cm in cms:
+            for c in cm:
+                by.setdefault(c["step"], []).append(c["mean_goal"])
+        L.append("\nMean goal score of each step's children (Jev, vs the start; not inflated by selection): " +
+                 ", ".join(f"{k}: {np.mean(v):.2f}" for k, v in sorted(by.items())))
     if a.arm == "L":
         ok = m["attain"] > 0.6 and m["complexity"] >= 0.5
         L.append(f"\n**Gate 0c** (mean attain > 0.6 and mean complexity >= 0.5): {'PASS' if ok else 'FAIL'}.")
@@ -868,7 +914,9 @@ def main() -> None:
     e.add_argument("--mutants", type=int, default=MUTANTS)
     e.add_argument("--steps", type=int, default=EXP_STEPS)
     e.add_argument("--limit", type=int, default=0, help="only the first k triggers (dry runs)")
-    e.add_argument("--max-usd", type=float, default=3.0, help="hard cap on the --out Jev cache's total spend (all arms)")
+    e.add_argument("--max-usd", type=float, default=6.0, help="hard cap on the --out Jev cache's total spend (all arms)")
+    e.add_argument("--evals", default=None, help="simulation cache folder (default <out>/evals; on Colab use local disk, "
+                   "e.g. /content/evals: accepted worlds are still copied to <out>/evals)")
     e.add_argument("--max-vlm-usd", type=float, default=3.0, help="hard cap on the --out VLM cache's total spend")
     for k in ("size", "warmup", "render", "gap", "sim_batch"):
         e.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
