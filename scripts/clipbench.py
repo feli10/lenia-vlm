@@ -105,6 +105,8 @@ def setup(a) -> dict:
     A0 = seeds.smooth_noise(qa.R, (a.size, a.size), 3, seed=qa.start_seed, size_r=3.0)
     ev = grow([Rule.from_dict(e["rule"]) for e in starts], [A0] * len(starts), a.warmup + a.render, a)
     clip = ClipScorer(a.clip)
+    for t in TARGETS[:a.targets]:                # sanity check: real CLIP cosines for these pictures sit around 0.15-0.30
+        print(f"start scores for '{t}': " + ", ".join(f"{x:.3f}" for x in clip.score([v["tile"] for v in ev], t)), file=sys.stderr)
     runs = []
     for name in a.configs.split(","):
         c = CONFIGS[name]

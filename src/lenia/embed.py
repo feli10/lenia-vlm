@@ -99,9 +99,10 @@ class ClipScorer:
                 import hashlib
                 v = np.random.default_rng(int(hashlib.sha1(prompt.encode()).hexdigest()[:8], 16)).normal(size=32)
             else:
-                with self.torch.no_grad():
+                with self.torch.no_grad():         # towers + projections directly: get_text_features changed in transformers 5
                     t = self.proc(text=[prompt], return_tensors="pt", padding=True).to(self.device)
-                    v = self.m.get_text_features(**t)[0].float().cpu().numpy()
+                    po = self.m.text_model(input_ids=t["input_ids"], attention_mask=t.get("attention_mask")).pooler_output
+                    v = self.m.text_projection(po)[0].float().cpu().numpy()
             self._text[prompt] = v / np.linalg.norm(v)
         return self._text[prompt]
 
@@ -120,7 +121,8 @@ class ClipScorer:
                 x = self.proc(images=[Image.fromarray(np.asarray(im, np.uint8)) for im in images[k:k + batch]],
                               return_tensors="pt").to(self.device)
                 with self.torch.no_grad():
-                    out.append(self.m.get_image_features(**x).float().cpu().numpy())
+                    po = self.m.vision_model(pixel_values=x["pixel_values"]).pooler_output
+                    out.append(self.m.visual_projection(po).float().cpu().numpy())
             v = np.concatenate(out) if out else np.zeros((0, 512), np.float32)
         return v / np.maximum(np.linalg.norm(v, axis=1, keepdims=True), 1e-9)
 
