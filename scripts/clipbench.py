@@ -24,7 +24,7 @@ Configurations (CONFIGS), each run on every (target, start) pair with the same b
   es-* runs over it is accumulated progress, not just more samples.
 - cma: separable CMA-ES (ASAL's optimiser; `pip install cma`) over each kernel's continuous parameters (m, log s, r, h)
   and log beta; ring structure fixed. Regrow, as in ASAL.
-Starts: --starts random elites of the base run's final map (fixed seed, grid noise excluded). Targets: TARGETS[:--targets].
+Starts: --starts random elites of the base run's final map (fixed seed, grid noise excluded). Targets: TARGETS[:--targets], or any text with --prompts.
 
 Round 1 (10-30, runs/clipbench): selection climbs (es-* at scale 1 beat the local control 7/8; scale 0.3 barely
 climbs: expedition v3 was too gentle); world inheritance adds a little (+0.004) but can spread into grid-filling
@@ -56,6 +56,16 @@ from lenia.mace import mutate, texture
 from lenia.sim import Rule
 
 TARGETS = ("a biological cell", "a worm", "a ring", "two cells", "a starfish", "a cluster of many small cells")
+
+
+def targets_of(a) -> list:
+    return [t.strip() for t in a.prompts.split("|")] if getattr(a, "prompts", None) else list(TARGETS[:a.targets])
+
+
+def target_id(t: str) -> int:
+    """Seed component for a target: its TARGETS index (round 1-2 seeds unchanged), else a stable hash of the text."""
+    import zlib
+    return TARGETS.index(t) if t in TARGETS else 100 + zlib.crc32(t.encode()) % 10 ** 6
 CONFIGS = {
     "es-regrow-0.3": {"opt": "es", "world": "regrow", "scale": 0.3},
     "es-inherit-0.3": {"opt": "es", "world": "inherit", "scale": 0.3},
@@ -96,6 +106,13 @@ def decode(x: np.ndarray, template: Rule) -> Rule:
     return Rule.from_dict(d)
 
 
+def motion(film) -> float:
+    """mace_qd's motion: |last - first snapshot| / mass over the rendered window (frozen ring patterns ~0.5, visibly
+    rearranging worlds 1.3-1.6). CLIP sees only the last snapshot, so nothing in its score rewards movement."""
+    first, last = np.asarray(film[0]), np.asarray(film[-1])
+    return float(np.abs(last - first).sum() / max(float(last.sum()), 1e-9))
+
+
 def grow(rules: list, worlds: list, steps: int, a) -> list:
     """Simulate; per rule: the 2x2 picture, its final snapshot (the CLIP input), the final state, the texture."""
     shape, out = (a.size, a.size), []
@@ -104,7 +121,7 @@ def grow(rules: list, worlds: list, steps: int, a) -> list:
         for st, f in zip(final, films):
             pic = ME.picture(f)
             out.append({"pic": pic, "tile": pic[-ME.TILE:, -ME.TILE:], "state": np.asarray(st, np.float32),
-                        "texture": float(texture(st))})
+                        "texture": float(texture(st)), "motion": motion(f)})
     return out
 
 
@@ -117,12 +134,12 @@ def setup(a) -> dict:
     A0 = seeds.smooth_noise(qa.R, (a.size, a.size), 3, seed=qa.start_seed, size_r=3.0)
     ev = grow([Rule.from_dict(e["rule"]) for e in starts], [A0] * len(starts), a.warmup + a.render, a)
     clip = ClipScorer(a.clip)
-    for t in TARGETS[:a.targets]:                # sanity check: real CLIP cosines for these pictures sit around 0.15-0.30
+    for t in targets_of(a):                # sanity check: real CLIP cosines for these pictures sit around 0.15-0.30
         print(f"start scores for '{t}': " + ", ".join(f"{x:.3f}" for x in clip.score([v["tile"] for v in ev], t)), file=sys.stderr)
     runs = []
     for name in a.configs.split(","):
         c = CONFIGS[name]
-        for t in TARGETS[:a.targets]:
+        for t in targets_of(a):
             for si, (e, v) in enumerate(zip(starts, ev)):
                 s0 = float(clip.score([v["tile"]], t)[0])
                 r = {"config": name, **c, "target": t, "start": si, "start_image": e["image"], "start_rule": e["rule"],
@@ -152,7 +169,7 @@ def run(a) -> None:
         step, t0 = S["step"] + 1, time.time()
         kids = []                                                # (run index, rule, initial world, x for cma)
         for ri, r in enumerate(runs):
-            rng = np.random.default_rng([a.seed, TARGETS.index(r["target"]), r["start"], step])   # shared across configs
+            rng = np.random.default_rng([a.seed, target_id(r["target"]), r["start"], step])   # shared across configs
             if r["opt"] == "cma":
                 X = r["es"].ask()
                 rr = [decode(np.asarray(x), Rule.from_dict(r["start_rule"])) for x in X]
@@ -172,7 +189,7 @@ def run(a) -> None:
         for ri, r in enumerate(runs):
             ks = [k for k, kid in enumerate(kids) if kid[0] == ri]
             clip_sc = emb[ks] @ clip.text(r["target"])
-            ok = np.array([ev[k]["texture"] <= a.max_texture for k in ks])
+            ok = np.array([ev[k]["texture"] <= a.max_texture and ev[k]["motion"] >= a.min_motion for k in ks])
             sc = np.array([jev.get(k, np.nan) for k in ks]) if r.get("judge") == "jev" else clip_sc
             valid = np.where(ok, sc, -np.inf)
             j = int(np.argmax(valid)) if ok.any() else None
@@ -182,9 +199,11 @@ def run(a) -> None:
                 k = ks[j]
                 r["parent"], r["state"], r["parent_score"] = kids[k][1].to_dict(), ev[k]["state"], float(clip_sc[j])
             if j is not None and float(clip_sc[j]) > r["best"]["score"]:   # the record is always in CLIP's terms
-                r["best"] = {"score": float(clip_sc[j]), "step": step, "pic": ev[ks[j]]["pic"], "rule": kids[ks[j]][1].to_dict()}
+                r["best"] = {"score": float(clip_sc[j]), "step": step, "pic": ev[ks[j]]["pic"], "rule": kids[ks[j]][1].to_dict(),
+                             "motion": ev[ks[j]]["motion"]}
             rec = {"step": step, "mean": float(clip_sc[ok].mean()) if ok.any() else None,
-                   "max": float(clip_sc[ok].max()) if ok.any() else None, "valid": int(ok.sum()), "parent": r["parent_score"]}
+                   "max": float(clip_sc[ok].max()) if ok.any() else None, "valid": int(ok.sum()), "parent": r["parent_score"],
+                   "motion": float(np.mean([ev[k]["motion"] for k, o in zip(ks, ok) if o])) if ok.any() else None}
             if r.get("judge") == "jev" and ok.sum() > 2:
                 rec["jev_mean"] = float(np.mean(sc[ok]))
                 rec["rho"] = spearman(sc[ok], clip_sc[ok])      # do Jev and CLIP rank these siblings alike?
@@ -222,7 +241,7 @@ def jev_scores(a, out: Path, runs: list, kids: list, ev: list) -> dict:
     mq, idx = [], []
     for k, (ri, *_) in enumerate(kids):
         r = runs[ri]
-        if r.get("judge") != "jev" or ev[k]["texture"] > a.max_texture:
+        if r.get("judge") != "jev" or ev[k]["texture"] > a.max_texture or ev[k]["motion"] < a.min_motion:
             continue
         pid = attain_prompt({"id": "bench_" + r["target"].replace(" ", "_"), "sees": "an ordinary world from this search",
                              "push": f"make it look like {r['target']}"})
@@ -242,7 +261,7 @@ def save(out: Path, S: dict) -> None:
         Image.fromarray(r["start_pic"]).save(out / "img" / f"start_{r['start']}.png")
         rows.append({x: r[x] for x in ("config", "opt", "world", "scale", "target", "start", "start_image", "score0")} |
                     {"steps": r["steps"], "best_score": r["best"]["score"], "best_step": r["best"]["step"],
-                     "best_rule": r["best"].get("rule"), "best_image": f"img/best_{k:03d}.png"})
+                     "best_rule": r["best"].get("rule"), "best_motion": r["best"].get("motion"), "best_image": f"img/best_{k:03d}.png"})
     (out / "results.json").write_text(json.dumps({"args": S["args"], "runs": rows}, indent=1))
 
 
@@ -277,6 +296,13 @@ def report(a) -> None:
             rr = [r for r in jr if r["config"] == c]
             L.append(f"- {c}: mean rho {mean([s.get('rho') for r in rr for s in r['steps']]):+.3f}; by step " + ", ".join(
                 f"{mean([r['steps'][i].get('rho') for r in rr if len(r['steps']) > i]):+.2f}" for i in range(len(rr[0]['steps']))))
+    if any("motion" in s for r in R for s in r["steps"]):
+        L += ["", "Motion (mace_qd's measure; frozen ~0.5, rearranging 1.3-1.6), children's mean at step 1 -> last step, and "
+              "the best world's (CLIP sees one frame, so nothing here rewards movement):", ""]
+        for c in cfgs:
+            rr = [r for r in R if r["config"] == c]
+            L.append(f"- {c}: children {mean([r['steps'][0].get('motion') for r in rr]):.2f} -> "
+                     f"{mean([r['steps'][-1].get('motion') for r in rr]):.2f}; best worlds {mean([r.get('best_motion') for r in rr]):.2f}")
     L += ["", "Children's mean score per step (all targets and starts):", ""]
     for c in cfgs:
         rr = [r for r in R if r["config"] == c]
@@ -367,7 +393,7 @@ def gifs(a) -> None:
     for p, pc in zip(panels, pics):
         sc = float(clip.score([ME.picture(np.stack(pc))[-ME.TILE:, -ME.TILE:]], p[0])[0])
         p_rec = f"{p[5]:.3f}" if p[5] is not None else "  -  "
-        print(f"  {p[0]:<20} start {p[1]} {p[2]:<32} recorded {p_rec}  replayed {sc:.3f}", file=sys.stderr)
+        print(f"  {p[0]:<20} start {p[1]} {p[2]:<26} recorded {p_rec}  replayed {sc:.3f}  motion {motion(pc):.2f}", file=sys.stderr)
     (out / "gifs").mkdir(exist_ok=True)
     try:
         font = ImageFont.load_default(size=13)
@@ -415,6 +441,7 @@ def main() -> None:
     r.add_argument("--clip", default="openai/clip-vit-base-patch32", help="a transformers CLIP model, or fake")
     r.add_argument("--configs", default=",".join(CONFIGS))
     r.add_argument("--targets", type=int, default=4, help="the first k of TARGETS")
+    r.add_argument("--prompts", default=None, help='custom targets, "|"-separated (overrides --targets), e.g. "a starfish|a pepperoni pizza"')
     r.add_argument("--starts", type=int, default=2)
     r.add_argument("--steps", type=int, default=12)
     r.add_argument("--lam", type=int, default=16, help="children per step")
@@ -425,6 +452,7 @@ def main() -> None:
     r.add_argument("--gap", type=int, default=400)
     r.add_argument("--inherit-steps", type=int, default=1500, help="steps a child runs from its parent's final state")
     r.add_argument("--max-texture", type=float, default=0.3)
+    r.add_argument("--min-motion", type=float, default=0.0, help="exclude children below this motion (0 = off; logged either way)")
     r.add_argument("--sim-batch", type=int, default=64)
     r.add_argument("--judge", default="jev")
     r.add_argument("--max-usd", type=float, default=1.0, help="hard cap on this bench's Jev spend (its own cache)")
