@@ -8,6 +8,9 @@ prompt's. Nothing here calls an API.
 
   python scripts/clipbench.py run    --run RUNS/mace-qd5-sarch-s0 --out RUNS/clipbench --backend auto   # Colab, ~1 h
   python scripts/clipbench.py report --out RUNS/clipbench
+  python scripts/clipbench.py gifs   --run RUNS/mace-qd5-sarch-s0 --out RUNS/clipbench --backend auto  # before/after films
+  python scripts/clipbench.py run --run RUNS/mace-qd5-sarch-s0 --out RUNS/clipbench-jev --backend auto \
+      --configs es-regrow-1,jev-regrow-1,local-1                      # round 2: can Jev steer? (~$0.35, ~40 min)
   python scripts/clipbench.py run    --run runs/mace-qd5-sarch-s0 --out /tmp/cb --clip fake --size 48 --warmup 40 \\
       --render 40 --gap 10 --inherit-steps 40 --steps 3 --lam 4 --starts 1 --targets 2                    # offline
 
@@ -23,6 +26,11 @@ Configurations (CONFIGS), each run on every (target, start) pair with the same b
   and log beta; ring structure fixed. Regrow, as in ASAL.
 Starts: --starts random elites of the base run's final map (fixed seed, grid noise excluded). Targets: TARGETS[:--targets].
 
+Round 1 (10-30, runs/clipbench): selection climbs (es-* at scale 1 beat the local control 7/8; scale 0.3 barely
+climbs: expedition v3 was too gentle); world inheritance adds a little (+0.004) but can spread into grid-filling
+textures; sep-CMA-ES climbs less but in every run. Round 2: jev-* steer by Jev (the expedition's goal score vs the
+start) while CLIP, held out, scores every child; mutation randomness is shared across configurations (seeded by
+target, start and step), so jev-regrow-1 vs es-regrow-1 is paired.
 Reported per configuration: climb (mean CLIP score of the children at the last 3 steps minus at step 1: progress not
 inflated by selection), gain (best world minus the start), and how often it beats the local control on gain.
 From papers: CLIP-guided target search on Lenia and sep-CMA-ES (ASAL, Kumar et al. 2024); the (1,lambda)-ES (Rechenberg,
@@ -41,7 +49,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 import mace_qd as QD
-from lenia import backend, seeds
+from lenia import backend, render, seeds
 from lenia import mace as ME
 from lenia.embed import ClipScorer
 from lenia.mace import mutate, texture
@@ -55,6 +63,10 @@ CONFIGS = {
     "es-inherit-1": {"opt": "es", "world": "inherit", "scale": 1.0},
     "local-1": {"opt": "local", "world": "regrow", "scale": 1.0},
     "cma": {"opt": "cma", "world": "regrow", "scale": 1.0},
+    # Jev steering, CLIP held out (round 2, 10-30): selection by Jev's goal score against the start (the expedition's
+    # rule), with the target as the goal; CLIP still scores every child but never selects.
+    "jev-regrow-1": {"opt": "es", "world": "regrow", "scale": 1.0, "judge": "jev"},
+    "jev-inherit-1": {"opt": "es", "world": "inherit", "scale": 1.0, "judge": "jev"},
 }
 SD = (0.01, 0.08, 0.03, 0.05)          # per-kernel mutation sd at scale 1: m, log s, r, h (as lenia.mace.mutate_kernel)
 BOUNDS = ((0.05, 0.6), (np.log(0.003), np.log(0.2)), (0.3, 1.0), (0.05, 1.0))
@@ -140,7 +152,7 @@ def run(a) -> None:
         step, t0 = S["step"] + 1, time.time()
         kids = []                                                # (run index, rule, initial world, x for cma)
         for ri, r in enumerate(runs):
-            rng = np.random.default_rng([a.seed, ri, step])
+            rng = np.random.default_rng([a.seed, TARGETS.index(r["target"]), r["start"], step])   # shared across configs
             if r["opt"] == "cma":
                 X = r["es"].ask()
                 rr = [decode(np.asarray(x), Rule.from_dict(r["start_rule"])) for x in X]
@@ -156,22 +168,27 @@ def run(a) -> None:
                 for k, e in zip(idx, grow([kids[k][1] for k in idx], [kids[k][2] for k in idx], steps, a)):
                     ev[k] = e
         emb = clip.images([e["tile"] for e in ev])
+        jev = jev_scores(a, out, runs, kids, ev) if any(r.get("judge") == "jev" for r in runs) else {}
         for ri, r in enumerate(runs):
             ks = [k for k, kid in enumerate(kids) if kid[0] == ri]
-            sc = emb[ks] @ clip.text(r["target"])
+            clip_sc = emb[ks] @ clip.text(r["target"])
             ok = np.array([ev[k]["texture"] <= a.max_texture for k in ks])
+            sc = np.array([jev.get(k, np.nan) for k in ks]) if r.get("judge") == "jev" else clip_sc
             valid = np.where(ok, sc, -np.inf)
             j = int(np.argmax(valid)) if ok.any() else None
             if r["opt"] == "cma":
                 r["es"].tell([kids[k][3] for k in ks], list(np.where(ok, -sc, 1.0)))
             if j is not None and r["opt"] == "es":
                 k = ks[j]
-                r["parent"], r["state"], r["parent_score"] = kids[k][1].to_dict(), ev[k]["state"], float(sc[j])
-            if j is not None and float(sc[j]) > r["best"]["score"]:
-                r["best"] = {"score": float(sc[j]), "step": step, "pic": ev[ks[j]]["pic"], "rule": kids[ks[j]][1].to_dict()}
-            r["steps"].append({"step": step, "mean": float(sc[ok].mean()) if ok.any() else None,
-                               "max": float(sc[ok].max()) if ok.any() else None, "valid": int(ok.sum()),
-                               "parent": r["parent_score"]})
+                r["parent"], r["state"], r["parent_score"] = kids[k][1].to_dict(), ev[k]["state"], float(clip_sc[j])
+            if j is not None and float(clip_sc[j]) > r["best"]["score"]:   # the record is always in CLIP's terms
+                r["best"] = {"score": float(clip_sc[j]), "step": step, "pic": ev[ks[j]]["pic"], "rule": kids[ks[j]][1].to_dict()}
+            rec = {"step": step, "mean": float(clip_sc[ok].mean()) if ok.any() else None,
+                   "max": float(clip_sc[ok].max()) if ok.any() else None, "valid": int(ok.sum()), "parent": r["parent_score"]}
+            if r.get("judge") == "jev" and ok.sum() > 2:
+                rec["jev_mean"] = float(np.mean(sc[ok]))
+                rec["rho"] = spearman(sc[ok], clip_sc[ok])      # do Jev and CLIP rank these siblings alike?
+            r["steps"].append(rec)
         S["step"] = step
         tmp = out / "checkpoint.tmp"
         tmp.write_bytes(pickle.dumps(S))
@@ -181,6 +198,40 @@ def run(a) -> None:
             for c in dict.fromkeys(r["config"] for r in runs)), file=sys.stderr)
     save(out, S)
     report(a)
+
+
+def spearman(x, y) -> float:
+    rx, ry = np.argsort(np.argsort(x)), np.argsort(np.argsort(y))
+    return float(np.corrcoef(rx, ry)[0, 1]) if np.std(rx) > 0 and np.std(ry) > 0 else float("nan")
+
+
+_JUDGE = {}
+
+
+def jev_scores(a, out: Path, runs: list, kids: list, ev: list) -> dict:
+    """Jev's goal score against the start for every child of a Jev-steered run: the attain prompt with the target as
+    the goal, both orders (as an expedition, minus the complexity floor). Returns {child index: P}."""
+    from lenia.config import REPO_ROOT, load
+    from lenia.judge import Judge, MultiQuery, load_env
+    from lenia.prompts import attain_prompt
+    if "j" not in _JUDGE:
+        cfg = load(None)
+        load_env(REPO_ROOT / ".env")
+        _JUDGE["j"] = Judge(a.judge, {**cfg["judges"]["defaults"], **cfg["judges"][a.judge], "max_run_usd": a.max_usd},
+                            out / "judge_cache.sqlite", yes=True)
+    mq, idx = [], []
+    for k, (ri, *_) in enumerate(kids):
+        r = runs[ri]
+        if r.get("judge") != "jev" or ev[k]["texture"] > a.max_texture:
+            continue
+        pid = attain_prompt({"id": "bench_" + r["target"].replace(" ", "_"), "sees": "an ordinary world from this search",
+                             "push": f"make it look like {r['target']}"})
+        mq += [MultiQuery((pid,), ev[k]["pic"], r["start_pic"]), MultiQuery((pid,), r["start_pic"], ev[k]["pic"])]
+        idx.append(k)
+    vs = _JUDGE["j"].judge_multi(mq, desc="bench Jev")
+    if any(not all(v.ok for v in vv) for vv in vs):
+        sys.exit("some Jev requests failed (not cached); re-run to resume")
+    return {k: 0.5 * (vs[2 * n][0].p_first + 1 - vs[2 * n + 1][0].p_first) for n, k in enumerate(idx)}
 
 
 def save(out: Path, S: dict) -> None:
@@ -218,6 +269,14 @@ def report(a) -> None:
     for t in dict.fromkeys(r["target"] for r in R):
         L.append(f"| {t} | " + " | ".join(f"{mean([gain(r) for r in R if r['config'] == c and r['target'] == t]):+.4f}"
                                           for c in cfgs) + " |")
+    jr = [r for r in R if any("rho" in s for s in r["steps"])]
+    if jr:
+        L += ["", "Jev-steered runs: Spearman correlation between Jev's goal scores and CLIP's among siblings, per step "
+              "(1 = same ranking, 0 = unrelated):", ""]
+        for c in dict.fromkeys(r["config"] for r in jr):
+            rr = [r for r in jr if r["config"] == c]
+            L.append(f"- {c}: mean rho {mean([s.get('rho') for r in rr for s in r['steps']]):+.3f}; by step " + ", ".join(
+                f"{mean([r['steps'][i].get('rho') for r in rr if len(r['steps']) > i]):+.2f}" for i in range(len(rr[0]['steps']))))
     L += ["", "Children's mean score per step (all targets and starts):", ""]
     for c in cfgs:
         rr = [r for r in R if r["config"] == c]
@@ -251,6 +310,101 @@ def sheet(out: Path, R: list, cfgs: list, px: int = 150) -> None:
     im.save(out / "sheet.png")
 
 
+def gifs(a) -> None:
+    """Before/after films: per target, one GIF with a row per start world and a column per setting (the start, then
+    each configuration's best world), every world growing from the same smoothed-noise start, as it was scored.
+    Regrow configurations replay exactly. Inherit worlds can't (they depend on the whole lineage of states), so for
+    those the checkpoint's final parent world is continued instead, labelled as such. Prints a replay check: CLIP's
+    score of each replayed final picture vs the score recorded in the run."""
+    from PIL import ImageFont
+    out = Path(a.out)
+    backend.configure(a.backend)
+    res = json.loads((out / "results.json").read_text())
+    R, A = res["runs"], res["args"]
+    st = json.loads((Path(a.run) / "state.json").read_text())
+    qa = QD.settings(st)
+    by_img = {e["image"]: e["rule"] for m in QD.islands_of(st) for e in m.values() if "image" in e}
+    shape, steps = (A["size"], A["size"]), A["warmup"] + A["render"]
+    A0 = seeds.smooth_noise(qa.R, shape, 3, seed=qa.start_seed, size_r=3.0)
+    ck = out / "checkpoint.pkl"
+    CK = pickle.loads(ck.read_bytes())["runs"] if ck.exists() else []
+    cfgs = [c for c in a.configs.split(",") if any(r["config"] == c for r in R)]
+    panels = []                                   # (target, start, column label, rule, world, recorded score or None)
+    for t in dict.fromkeys(r["target"] for r in R):
+        for s in sorted({r["start"] for r in R if r["target"] == t}):
+            rr = {r["config"]: r for r in R if r["target"] == t and r["start"] == s}
+            r0 = next(iter(rr.values()))
+            panels.append((t, s, "start", by_img[r0["start_image"]], A0, r0["score0"]))
+            for c in cfgs:
+                r = rr.get(c)
+                if r is None:
+                    continue
+                if CONFIGS[c]["world"] == "inherit":
+                    k = next((x for x in CK if x["config"] == c and x["target"] == t and x["start"] == s), None)
+                    if k is not None:
+                        panels.append((t, s, f"{c.replace('es-', '')} (continued)", k["parent"], k["state"], None))
+                elif r.get("best_rule"):
+                    panels.append((t, s, c, r["best_rule"], A0, r["best_score"]))
+    keep_pic = {steps - i * A["gap"] for i in range(ME.FRAMES)}
+    films, pics = [[] for _ in panels], [[] for _ in panels]
+    for k0 in range(0, len(panels), a.sim_batch):
+        P = panels[k0:k0 + a.sim_batch]
+        b = backend.make_batch([Rule.from_dict(p[3]) for p in P], shape)
+        X = backend.to_device(np.stack([np.asarray(p[4], np.float32) for p in P]))
+        for t in range(steps + 1):
+            if t:
+                X = b.step(X)
+            if t % a.every == 0 or t in keep_pic:
+                x = backend.to_numpy(X).copy()
+                for j in range(len(P)):
+                    if t % a.every == 0:
+                        films[k0 + j].append((t, x[j]))
+                    if t in keep_pic:
+                        pics[k0 + j].append(x[j])
+        print(f"simulated {min(k0 + a.sim_batch, len(panels))}/{len(panels)} worlds", file=sys.stderr)
+    clip = ClipScorer(a.clip)
+    print("replay check (CLIP score of the replayed world vs recorded):", file=sys.stderr)
+    for p, pc in zip(panels, pics):
+        sc = float(clip.score([ME.picture(np.stack(pc))[-ME.TILE:, -ME.TILE:]], p[0])[0])
+        p_rec = f"{p[5]:.3f}" if p[5] is not None else "  -  "
+        print(f"  {p[0]:<20} start {p[1]} {p[2]:<32} recorded {p_rec}  replayed {sc:.3f}", file=sys.stderr)
+    (out / "gifs").mkdir(exist_ok=True)
+    try:
+        font = ImageFont.load_default(size=13)
+    except TypeError:
+        font = ImageFont.load_default()
+    px, pad, head = a.px, 6, 34
+    for t in dict.fromkeys(p[0] for p in panels):
+        idx = [i for i, p in enumerate(panels) if p[0] == t]
+        rows = sorted({panels[i][1] for i in idx})
+        cols = list(dict.fromkeys(panels[i][2] for i in idx))
+        W, H = pad + len(cols) * (px + pad), head + len(rows) * (px + 16 + pad)
+        scale = {i: max(float(np.percentile(np.stack([f for _, f in films[i]][-max(1, len(films[i]) // 2):]), 99.5)), 1e-6)
+                 for i in idx}                    # one brightness per world, from its second half (noise excluded)
+        frames = []
+        for n in range(len(films[idx[0]])):
+            im = Image.new("RGB", (W, H), (24, 24, 24))
+            d = ImageDraw.Draw(im)
+            tt = films[idx[0]][n][0]
+            d.text((pad, 4), f"'{t}'  step {tt}/{steps}" + ("  (scored at the end)" if tt == steps else ""),
+                   fill="white", font=font)
+            for i in idx:
+                r_, c_ = rows.index(panels[i][1]), cols.index(panels[i][2])
+                x0, y0 = pad + c_ * (px + pad), head + r_ * (px + 16 + pad)
+                if r_ == 0:
+                    d.text((x0, head - 16), panels[i][2], fill=(200, 200, 200), font=font)
+                f = films[i][n][1]
+                tile = Image.fromarray(render.colorize(np.clip(f / scale[i], 0, 1))).resize((px, px), Image.BILINEAR)
+                im.paste(tile, (x0, y0))
+                lab = f"start {panels[i][1]}" + (f"   CLIP {panels[i][5]:.3f}" if panels[i][5] is not None else "")
+                d.text((x0, y0 + px + 2), lab, fill=(200, 200, 200), font=font)
+            frames.append(im.quantize(colors=255, method=Image.MEDIANCUT, dither=Image.NONE))
+        frames += [frames[-1]] * a.hold
+        f_out = out / "gifs" / f"{t.replace(' ', '_')}.gif"
+        frames[0].save(f_out, save_all=True, append_images=frames[1:], duration=int(1000 / a.fps), loop=0, optimize=True)
+        print(f"wrote {f_out} ({f_out.stat().st_size / 1e6:.1f} MB)", file=sys.stderr)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -272,10 +426,23 @@ def main() -> None:
     r.add_argument("--inherit-steps", type=int, default=1500, help="steps a child runs from its parent's final state")
     r.add_argument("--max-texture", type=float, default=0.3)
     r.add_argument("--sim-batch", type=int, default=64)
+    r.add_argument("--judge", default="jev")
+    r.add_argument("--max-usd", type=float, default=1.0, help="hard cap on this bench's Jev spend (its own cache)")
     p = sub.add_parser("report")
     p.add_argument("--out", required=True)
+    g = sub.add_parser("gifs", help="before/after films of the best worlds")
+    g.add_argument("--run", required=True, help="the base run (start worlds)")
+    g.add_argument("--out", required=True, help="a finished bench folder")
+    g.add_argument("--backend", default="numpy")
+    g.add_argument("--clip", default="openai/clip-vit-base-patch32")
+    g.add_argument("--configs", default="es-regrow-1,cma,es-inherit-1")
+    g.add_argument("--every", type=int, default=30, help="simulation steps per GIF frame")
+    g.add_argument("--px", type=int, default=200)
+    g.add_argument("--fps", type=int, default=15)
+    g.add_argument("--hold", type=int, default=20, help="frames to hold the last (scored) frame")
+    g.add_argument("--sim-batch", type=int, default=64)
     a = ap.parse_args()
-    {"run": run, "report": report}[a.cmd](a)
+    {"run": run, "report": report, "gifs": gifs}[a.cmd](a)
 
 
 if __name__ == "__main__":
