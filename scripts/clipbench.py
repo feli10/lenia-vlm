@@ -431,6 +431,43 @@ def gifs(a) -> None:
         print(f"wrote {f_out} ({f_out.stat().st_size / 1e6:.1f} MB)", file=sys.stderr)
 
 
+def cross(a) -> None:
+    """Is CLIP's steering target-specific? Score every run's start and best world against every target of the bench
+    (plus a neutral prompt). Specific gain = the best world's gain on its own target minus its mean gain on the other
+    targets: ~0 means the search made worlds more CLIP-friendly in general (sharper, more object-like), not more
+    like the target. Also: how often the best world's top-scoring target is its own (chance = 1 / number of targets)."""
+    out = Path(a.out)
+    R = json.loads((out / "results.json").read_text())["runs"]
+    T = list(dict.fromkeys(r["target"] for r in R))
+    P = T + [x for x in a.neutral.split("|") if x]
+    clip = ClipScorer(a.clip)
+    tile = lambda f: np.asarray(Image.open(out / f).convert("RGB"))[-ME.TILE:, -ME.TILE:]
+    txt = np.stack([clip.text(p) for p in P], 1)
+    L = ["# Cross-scores: every start and best world against every target\n",
+         "Rows: runs (config, own target, start). Cells: best world's score, (gain over the start's score for the same "
+         "prompt). * = the prompt CLIP ranks highest among the targets for this world.\n",
+         "| config | target | start | " + " | ".join(P) + " | specific gain |", "|---" * (len(P) + 4) + "|"]
+    spec, hits = {}, {}
+    for k, r in enumerate(R):
+        e = clip.images([tile(f"img/start_{r['start']}.png"), tile(r["best_image"])])
+        s0, s1 = e[0] @ txt, e[1] @ txt
+        g = s1 - s0
+        own = T.index(r["target"])
+        sg = float(g[own] - np.mean([g[j] for j in range(len(T)) if j != own]))
+        top = int(np.argmax(s1[:len(T)]))
+        spec.setdefault(r["config"], []).append(sg)
+        hits.setdefault(r["config"], []).append(top == own)
+        L.append(f"| {r['config']} | {r['target']} | {r['start']} | " + " | ".join(
+            f"{s1[j]:.3f}{'*' if j == top else ''} ({g[j]:+.3f})" for j in range(len(P))) + f" | {sg:+.4f} |")
+    L += ["", f"Chance of the own target ranking top: {1 / len(T):.2f}.", ""]
+    for c in spec:
+        L.append(f"- {c}: specific gain {np.mean(spec[c]):+.4f} (mean gain on own target "
+                 f"{np.mean([r['best_score'] - r['score0'] for r in R if r['config'] == c]):+.4f}); "
+                 f"own target top {sum(hits[c])}/{len(hits[c])}")
+    (out / "cross.md").write_text("\n".join(L) + "\n")
+    print("\n".join(L))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -469,8 +506,12 @@ def main() -> None:
     g.add_argument("--fps", type=int, default=15)
     g.add_argument("--hold", type=int, default=20, help="frames to hold the last (scored) frame")
     g.add_argument("--sim-batch", type=int, default=64)
+    x = sub.add_parser("cross", help="is the steering target-specific? every world vs every target")
+    x.add_argument("--out", required=True)
+    x.add_argument("--clip", default="openai/clip-vit-base-patch32")
+    x.add_argument("--neutral", default="an abstract colorful pattern", help='"|"-separated extra prompts')
     a = ap.parse_args()
-    {"run": run, "report": report, "gifs": gifs}[a.cmd](a)
+    {"run": run, "report": report, "gifs": gifs, "cross": cross}[a.cmd](a)
 
 
 if __name__ == "__main__":
