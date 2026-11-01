@@ -296,6 +296,8 @@ def report(a) -> None:
             rr = [r for r in jr if r["config"] == c]
             L.append(f"- {c}: mean rho {mean([s.get('rho') for r in rr for s in r['steps']]):+.3f}; by step " + ", ".join(
                 f"{mean([r['steps'][i].get('rho') for r in rr if len(r['steps']) > i]):+.2f}" for i in range(len(rr[0]['steps']))))
+            L.append(f"- {c}: Jev's own goal score, children's mean per step (0.5 = no better than the start): " + ", ".join(
+                f"{mean([r['steps'][i].get('jev_mean') for r in rr if len(r['steps']) > i]):.2f}" for i in range(len(rr[0]['steps']))))
     if any("motion" in s for r in R for s in r["steps"]):
         L += ["", "Motion (mace_qd's measure; frozen ~0.5, rearranging 1.3-1.6), children's mean at step 1 -> last step, and "
               "the best world's (CLIP sees one frame, so nothing here rewards movement):", ""]
