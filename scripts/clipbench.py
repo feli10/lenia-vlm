@@ -87,6 +87,9 @@ CONFIGS = {
     "jev-playoff-1": {"opt": "es", "world": "regrow", "scale": 1.0, "judge": "jev", "playoff": True},
     "jev-clipfilter-1": {"opt": "es", "world": "regrow", "scale": 1.0, "judge": "jev", "prefilter": 3},
     "jev-sched": {"opt": "es", "world": "regrow", "scale": 1.0, "judge": "jev", "sched": (2.0, 0.5)},
+    # The candidate expedition step (11-01, after round 3 and Felix's blind ratings): CLIP shortlist with a motion
+    # floor, Jev chooses against the start, mutation 2.0 -> 0.8 (the 0.5 end was too fine to judge).
+    "jev-v4": {"opt": "es", "world": "regrow", "scale": 1.0, "judge": "jev", "prefilter": 3, "sched": (2.0, 0.8)},
 }
 SD = (0.01, 0.08, 0.03, 0.05)          # per-kernel mutation sd at scale 1: m, log s, r, h (as lenia.mace.mutate_kernel)
 BOUNDS = ((0.05, 0.6), (np.log(0.003), np.log(0.2)), (0.3, 1.0), (0.05, 1.0))
@@ -559,6 +562,77 @@ def cross(a) -> None:
     print("\n".join(L))
 
 
+def rate(a) -> None:
+    """Blind pairwise rating of the best worlds on the Mac, in the goal-pair page used for gate 0c (lenia.rating).
+    For every (target, start), every pair of configurations' best worlds (the 2x2 pictures Jev saw), random sides,
+    opaque image names. Answers go to <out>/rate/ratings.csv; `rate --report` turns them into win rates per config."""
+    import hashlib
+    import shutil
+    from itertools import combinations
+    from lenia.rating import rate_goal_pairs
+    out = Path(a.out)
+    rdir = out / "rate"
+    R = json.loads((out / "results.json").read_text())["runs"]
+    if a.report:
+        return rate_report(rdir)
+    if not (rdir / "tasks.json").exists():
+        (rdir / "images").mkdir(parents=True, exist_ok=True)
+        rng = np.random.default_rng(a.seed)
+        cfgs = [c for c in (a.configs.split(",") if a.configs else dict.fromkeys(r["config"] for r in R))]
+        groups = {}
+        for r in R:
+            if r["config"] in cfgs:
+                groups.setdefault((r["target"], r["start"]), {})[r["config"]] = r
+        tasks = []
+        for (t, st), rr in groups.items():
+            ims = {}
+            for c, r in rr.items():
+                b = (out / r["best_image"]).read_bytes()
+                h = hashlib.sha1(b).hexdigest()[:12]
+                shutil.copy(out / r["best_image"], rdir / "images" / f"{h}.png")
+                ims[c] = h
+            for x, y in combinations(sorted(rr), 2):
+                if ims[x] == ims[y]:
+                    continue                                 # the same world (both kept the start): nothing to rate
+                l, rt = (x, y) if rng.random() < 0.5 else (y, x)
+                tasks.append({"left": f"{ims[l]}.png", "right": f"{ims[rt]}.png", "sees": "the start world of this search",
+                              "push": f"make it look like {t}", "target": t, "start": st, "left_cfg": l, "right_cfg": rt})
+        order = rng.permutation(len(tasks))
+        tasks = [{"id": n, **tasks[i]} for n, i in enumerate(order)]
+        (rdir / "tasks.json").write_text(json.dumps(tasks, indent=1))
+        print(f"{len(tasks)} pairs ({len(groups)} target-start groups); configuration names never reach the page")
+    rate_goal_pairs(rdir, port=a.port)
+
+
+def rate_report(rdir: Path) -> None:
+    import csv
+    tasks = {t["id"]: t for t in json.loads((rdir / "tasks.json").read_text())}
+    ans = {}
+    for row in csv.DictReader(open(rdir / "ratings.csv")):
+        ans[int(row["id"])] = row["answer"]                   # the last answer per pair counts
+    win, n, neither, by_t = {}, {}, 0, {}
+    for i, a_ in ans.items():
+        t = tasks[i]
+        if a_ == "neither":
+            neither += 1
+            continue
+        w, l = (t["left_cfg"], t["right_cfg"]) if a_ == "left" else (t["right_cfg"], t["left_cfg"])
+        for c, v in ((w, 1), (l, 0)):
+            win[c] = win.get(c, 0) + v
+            n[c] = n.get(c, 0) + 1
+            by_t.setdefault(c, {}).setdefault(t["target"], []).append(v)
+    targets = list(dict.fromkeys(t["target"] for t in tasks.values()))
+    L = [f"# Felix's blind ratings: {len(ans)}/{len(tasks)} pairs answered, {neither} 'neither'\n",
+         "Win rate = share of decided pairs in which this configuration's world showed the change more clearly "
+         "(0.5 = no better than the others).\n", "| configuration | win rate | decided | " + " | ".join(targets) + " |",
+         "|---" * (len(targets) + 3) + "|"]
+    for c in sorted(win, key=lambda c: -win[c] / n[c]):
+        L.append(f"| {c} | {win[c] / n[c]:.2f} | {n[c]} | " + " | ".join(
+            f"{np.mean(by_t[c][t]):.2f}" if by_t[c].get(t) else "-" for t in targets) + " |")
+    (rdir / "report.md").write_text("\n".join(L) + "\n")
+    print("\n".join(L))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -605,8 +679,14 @@ def main() -> None:
     x.add_argument("--out", required=True)
     x.add_argument("--clip", default="openai/clip-vit-base-patch32")
     x.add_argument("--neutral", default="an abstract colorful pattern", help='"|"-separated extra prompts')
+    q = sub.add_parser("rate", help="blind pairwise rating of the best worlds (Mac; local page)")
+    q.add_argument("--out", required=True, help="a finished bench folder, synced to the Mac (results.json + img/)")
+    q.add_argument("--configs", default=None, help="comma list (default: all in the run)")
+    q.add_argument("--port", type=int, default=8773)
+    q.add_argument("--seed", type=int, default=0)
+    q.add_argument("--report", action="store_true", help="summarise the answers instead of rating")
     a = ap.parse_args()
-    {"run": run, "report": report, "gifs": gifs, "cross": cross}[a.cmd](a)
+    {"run": run, "report": report, "gifs": gifs, "cross": cross, "rate": rate}[a.cmd](a)
 
 
 if __name__ == "__main__":
