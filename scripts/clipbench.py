@@ -90,6 +90,14 @@ CONFIGS = {
     # The candidate expedition step (11-01, after round 3 and Felix's blind ratings): CLIP shortlist with a motion
     # floor, Jev chooses against the start, mutation 2.0 -> 0.8 (the 0.5 end was too fine to judge).
     "jev-v4": {"opt": "es", "world": "regrow", "scale": 1.0, "judge": "jev", "prefilter": 3, "sched": (2.0, 0.8)},
+    # Round 4 (11-02): why did the shortlist help, and does re-anchoring fix the saturated ruler? Each differs from a
+    # round-3 setting in one thing.
+    # floor: as jev-clipfilter-1, but the 16 are drawn at random from the 48 children that pass the motion floor (no
+    #   CLIP): separates CLIP's taste from the floor.
+    # milestone: as jev-regrow-1, but Jev's reference moves to the current parent once the parent scores
+    #   >= --milestone-at against it, at most once every --milestone-gap steps (Felix's idea, 11-02).
+    "jev-floor": {"opt": "es", "world": "regrow", "scale": 1.0, "judge": "jev", "prefilter": 3, "shortlist": "random"},
+    "jev-milestone": {"opt": "es", "world": "regrow", "scale": 1.0, "judge": "jev", "milestone": True},
 }
 SD = (0.01, 0.08, 0.03, 0.05)          # per-kernel mutation sd at scale 1: m, log s, r, h (as lenia.mace.mutate_kernel)
 BOUNDS = ((0.05, 0.6), (np.log(0.003), np.log(0.2)), (0.3, 1.0), (0.05, 1.0))
@@ -204,7 +212,10 @@ def run(a) -> None:
         for ri, r in enumerate(runs):
             if r.get("prefilter"):
                 ks = [k for k, kid in enumerate(kids) if kid[0] == ri]
-                cs = emb[ks] @ clip.text(r["target"])
+                if r.get("shortlist") == "random":       # no CLIP: a random draw among the children that pass the floor
+                    cs = np.random.default_rng([a.seed, target_id(r["target"]), r["start"], step, 7]).random(len(ks))
+                else:
+                    cs = emb[ks] @ clip.text(r["target"])
                 ok_f = [ok_k[k] and ev[k]["motion"] >= a.prefilter_motion for k in ks]
                 order = [ks[i] for i in np.argsort(-np.where(ok_f, cs, -np.inf)) if ok_f[i]][:a.lam]
                 short -= set(ks) - set(order)
@@ -222,9 +233,14 @@ def run(a) -> None:
                 j = ks.index(win[ri])
             if r["opt"] == "cma":
                 r["es"].tell([kids[k][3] for k in ks], list(np.where(ok, -sc, 1.0)))
+            reanchor = False
             if j is not None and r["opt"] == "es":
                 k = ks[j]
                 r["parent"], r["state"], r["parent_score"] = kids[k][1].to_dict(), ev[k]["state"], float(clip_sc[j])
+                if (r.get("milestone") and float(sc[j]) >= a.milestone_at
+                        and step - r.get("ref_since", 0) >= a.milestone_gap):
+                    r["ref_pic"], r["ref_since"], reanchor = ev[k]["pic"], step, True
+                    r["ref_gen"] = r.get("ref_gen", 0) + 1
             if j is not None and float(clip_sc[j]) > r["best"]["score"]:   # the record is always in CLIP's terms
                 r["best"] = {"score": float(clip_sc[j]), "step": step, "pic": ev[ks[j]]["pic"], "rule": kids[ks[j]][1].to_dict(),
                              "motion": ev[ks[j]]["motion"]}
@@ -233,6 +249,8 @@ def run(a) -> None:
                    "motion": float(np.mean([ev[k]["motion"] for k, o in zip(ks, ok) if o])) if ok.any() else None}
             if r.get("sched"):
                 rec["scale"] = scale_at(r, step, a.steps)
+            if r.get("milestone"):
+                rec["ref_gen"], rec["reanchor"] = r.get("ref_gen", 0), reanchor
             js = elig & ~np.isnan(sc)
             if r.get("judge") == "jev" and js.sum() > 2:
                 rec["jev_mean"] = float(np.mean(sc[js]))
@@ -322,7 +340,8 @@ def jev_scores(a, out: Path, runs: list, kids: list, ev: list, short: set | None
                 or (short is not None and k not in short)):
             continue
         pid = bench_prompt(r["target"])
-        mq += [MultiQuery((pid,), ev[k]["pic"], r["start_pic"]), MultiQuery((pid,), r["start_pic"], ev[k]["pic"])]
+        ref = r.get("ref_pic", r["start_pic"])          # the start, or the latest milestone (jev-milestone)
+        mq += [MultiQuery((pid,), ev[k]["pic"], ref), MultiQuery((pid,), ref, ev[k]["pic"])]
         idx.append(k)
     vs = jev_judge(a, out).judge_multi(mq, desc="bench Jev")
     if any(not all(v.ok for v in vv) for vv in vs):
@@ -375,6 +394,10 @@ def report(a) -> None:
                 f"{mean([r['steps'][i].get('rho') for r in rr if len(r['steps']) > i]):+.2f}" for i in range(len(rr[0]['steps']))))
             L.append(f"- {c}: Jev's own goal score, children's mean per step (0.5 = no better than the start): " + ", ".join(
                 f"{mean([r['steps'][i].get('jev_mean') for r in rr if len(r['steps']) > i]):.2f}" for i in range(len(rr[0]['steps']))))
+            if any("ref_gen" in st for r in rr for st in r["steps"]):
+                L.append(f"- {c}: re-anchors per run {mean([r['steps'][-1].get('ref_gen') for r in rr]):.1f}; at steps " +
+                         ", ".join(str(st["step"]) for r in rr for st in r["steps"] if st.get("reanchor")) +
+                         " (Jev's scores restart against each new reference, so they are not comparable across stretches)")
             if any("jev_max" in st for r in rr for st in r["steps"]):
                 L.append(f"- {c}: Jev's score of the best sibling per step: " + ", ".join(
                     f"{mean([r['steps'][i].get('jev_max') for r in rr if len(r['steps']) > i]):.2f}" for i in range(len(rr[0]['steps']))))
@@ -660,6 +683,8 @@ def main() -> None:
     r.add_argument("--max-usd", type=float, default=1.0, help="hard cap on this bench's Jev spend (its own cache)")
     r.add_argument("--playoff-k", type=int, default=4, help="children in the head-to-head playoff (jev-playoff-*)")
     r.add_argument("--prefilter-motion", type=float, default=1.0, help="motion floor for the CLIP shortlist (clipfilter)")
+    r.add_argument("--milestone-at", type=float, default=0.85, help="re-anchor when the parent scores this vs the reference")
+    r.add_argument("--milestone-gap", type=int, default=5, help="at least this many steps between re-anchors")
     p = sub.add_parser("report")
     p.add_argument("--out", required=True)
     g = sub.add_parser("gifs", help="before/after films of the best worlds")
