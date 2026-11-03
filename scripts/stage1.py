@@ -6,6 +6,12 @@ Step 1, the trigger list:
   PYTHONPATH=src:scripts python3 scripts/stage1.py triggers --run runs/mace-qd5-sarch-s0 --out /tmp/s1-dry --judge fake
   PYTHONPATH=src:scripts python3 scripts/stage1.py sheet --out runs/stage1-s0          # redraw triggers.png only
 
+Goal captions for the v4 CLIP shortlist (arm N; arm L's are hand-written in data/goal_library_v3_captions.json):
+
+  PYTHONPATH=src:scripts python3 scripts/stage1.py captions --run runs/mace-qd5-sarch-s0 --out runs/stage1-s0 --max-vlm-usd 0.25
+  PYTHONPATH=src:scripts python3 scripts/stage1.py captions --run runs/mace-qd5-sarch-s0 --out runs/stage1-s0 \\
+      --caption-vlm fake --dest /tmp/cap-dry
+
 Step 5 on, the expeditions (Colab: GPU and judge calls; see colab/mace.ipynb):
 
   python scripts/stage1.py expedition --arm L  --run RUNS/mace-qd5-sarch-s0 --out RUNS/stage1-s0 --backend auto
@@ -51,7 +57,7 @@ from lenia import backend
 from lenia.config import REPO_ROOT, load
 from lenia.judge import ChoiceQuery, Judge, MultiQuery, Query, load_env
 from lenia.mace import mutate
-from lenia.prompts import (COMPLEXITY, NAMER, NONE, REVIEW_R, REVIEW_S, SESSION_MATCH, STEER, SURPRISE, attain_prompt,
+from lenia.prompts import (CAPTION, COMPLEXITY, NAMER, NONE, REVIEW_R, REVIEW_S, SESSION_MATCH, STEER, SURPRISE, attain_prompt,
                            steer_prompt)
 from lenia.sim import Rule
 
@@ -336,15 +342,95 @@ def _judges(a, s1: Path) -> Judge:
                  s1 / "judge_cache.sqlite", yes=True)
 
 
-def _describer(a, s1: Path):
+def _describer(a, s1: Path, cache_only: bool = False):
     from lenia.describe import Describer
     cfg = load(a.config)
     load_env(REPO_ROOT / ".env")
-    return Describer(a.vlm, cfg["vlms"][a.vlm], s1 / "describe_cache.sqlite", max_usd=a.max_vlm_usd)
+    return Describer(a.vlm, cfg["vlms"][a.vlm], s1 / "describe_cache.sqlite", max_usd=a.max_vlm_usd, cache_only=cache_only)
 
 
 def _pic(s1: Path, rel: str) -> np.ndarray:
     return np.asarray(Image.open(s1 / rel).convert("RGB"))
+
+
+def namer_goals(a, s1: Path, run: Path, T: list, starts: list, cache_only: bool = False) -> list:
+    """Arm N's goals: the VLM (--vlm) names each trigger against 4 typical worlds of the run."""
+    from lenia.describe import Ask
+    d = _describer(a, s1, cache_only)
+    goals, given = [], []
+    for t, w in zip(T, starts):                  # sequential: each call sees the names given so far (as the bake-off)
+        fill = {"names": "\n".join(f"- {x}" for x in given) if given else "(none yet)"}
+        [r] = d.ask_many([Ask(NAMER, [w] + [_pic(run, f"img/{n}") for n in typical(run, t)], fill)], desc=t["id"])
+        if not r.ok:
+            sys.exit(f"naming failed at {t['id']}: {r.raw[:300]} (re-run to retry)")
+        given.append(r.data["sees"])
+        goals.append({"id": goal_id(r.data["sees"], r.data["push"]), "sees": r.data["sees"], "push": r.data["push"],
+                      "source": f"namer:{d.model}", "cost": r.cost})
+    return goals
+
+
+# ---------- goal captions (v4 step 1, 11-02; project doc "Stage 1 direction - goal steering") ----------
+#
+# v4 shortlists each step's 48 children with CLIP (the 16 closest to a caption that pass the motion floor; Jev picks)
+# only when the goal's end state can be pictured. CLIP scores one still, the bottom-right snapshot, so a caption
+# (lenia.prompts.CAPTION) describes that still in 3-8 words, or is "none" for goals about motion, rhythm or change
+# between snapshots (those get the motion floor plus a random 16). Each goal also gets a "start" caption of the same
+# aspect of the start world, for directional scoring (the image change start -> child against the text change
+# start -> end; Gal et al. 2021, StyleGAN-NADA), tested offline in step 2.
+# Arm L: hand-written captions for the library goals it draws (CAPTIONS_L, checked by Felix). Arm N: one VLM call per
+# goal (the goal's sees and push, and the trigger's start picture). N's goals come from the namer's cached answers
+# only (cache_only: no new naming calls, since those define the goals); the captions go through --caption-vlm (Gemini
+# on Vertex by default; gemini-pro-or is the OpenRouter fallback) into their own cache, <dest>/caption_cache.sqlite.
+# Ours: the caption step, the "none" route and the start caption. From papers: CLIP text targets for search (ASAL,
+# Kumar et al. 2024), directional CLIP (Gal et al. 2021).
+
+CAPTIONS_L = "data/goal_library_v3_captions.json"
+
+
+def _caption(x: str) -> str:
+    t = x.strip().strip('."\'').strip()
+    return "none" if t.lower() in ("none", "n/a", "") else t
+
+
+def load_captions(path: Path) -> dict:
+    """{goal id: {"end": caption or "none", "start": ...}} from a captions file (a list of rows with id, end, start)."""
+    return {r["id"]: {"end": r["end"], "start": r["start"]} for r in json.loads(Path(path).read_text())}
+
+
+def captions(a) -> None:
+    from lenia.describe import Ask, Describer
+    s1, run = Path(a.out), Path(a.run)
+    dest = Path(a.dest) if a.dest else s1 / "captions"
+    dest.mkdir(parents=True, exist_ok=True)
+    T = json.loads((s1 / "triggers.json").read_text())["triggers"][:a.limit or None]
+    starts = [_pic(s1, f"img/{t['image']}") for t in T]
+    goals = namer_goals(a, s1, run, T, starts, cache_only=True)
+    cfg = load(a.config)
+    load_env(REPO_ROOT / ".env")
+    d = Describer(a.caption_vlm, cfg["vlms"][a.caption_vlm], dest / "caption_cache.sqlite", max_usd=a.max_vlm_usd)
+    ans = d.ask_many([Ask(CAPTION, [w], {"sees": g["sees"], "push": g["push"]}) for g, w in zip(goals, starts)],
+                     desc="N captions")
+    rows, failed = [], []
+    for t, g, r in zip(T, goals, ans):
+        if not r.ok:
+            failed.append(t["id"])
+            continue
+        end = _caption(r.data["end"])
+        start = "none" if end == "none" else _caption(r.data["start"])
+        flag = [] if end == "none" or 3 <= len(end.split()) <= 8 else ["end length"]
+        flag += [] if end == "none" or start != "none" else ["no start caption"]
+        rows.append({"trigger": t["id"], "id": g["id"], "sees": g["sees"], "push": g["push"], "end": end, "start": start,
+                     "by": f"{a.caption_vlm}:{d.model}", "version": r.version, "cost": round(r.cost, 6), "flags": flag})
+    if failed:
+        sys.exit(f"{len(failed)} caption calls failed ({', '.join(failed)}); re-run to retry them (answers are cached)")
+    (dest / "N.json").write_text(json.dumps(rows, indent=1))
+    L = [f"# Arm N goal captions, seed {a.seed} ({a.caption_vlm}, {CAPTION})\n",
+         f"{sum(r['end'] != 'none' for r in rows)} of {len(rows)} goals captioned; spend ${sum(r['cost'] for r in rows):.4f}.\n",
+         "| trigger | push | end caption | start caption | flags |", "|---|---|---|---|---|"]
+    L += [f"| {r['trigger']} | {r['push']} | {r['end']} | {r['start']} | {', '.join(r['flags'])} |" for r in rows]
+    (dest / "N.md").write_text("\n".join(L) + "\n")
+    print("\n".join(L))
+    print(f"wrote {dest / 'N.json'}", file=sys.stderr)
 
 
 def setup_arm(a, s1: Path, run: Path, T: list, judge) -> dict:
@@ -359,17 +445,7 @@ def setup_arm(a, s1: Path, run: Path, T: list, judge) -> dict:
             used.add(g["obs"])
             goals.append(g)
     elif a.arm == "N":
-        from lenia.describe import Ask
-        d = _describer(a, s1)
-        goals, given = [], []
-        for t, w in zip(T, starts):                  # sequential: each call sees the names given so far (as the bake-off)
-            fill = {"names": "\n".join(f"- {x}" for x in given) if given else "(none yet)"}
-            [r] = d.ask_many([Ask(NAMER, [w] + [_pic(run, f"img/{n}") for n in typical(run, t)], fill)], desc=t["id"])
-            if not r.ok:
-                sys.exit(f"naming failed at {t['id']}: {r.raw[:300]} (re-run to retry)")
-            given.append(r.data["sees"])
-            goals.append({"id": goal_id(r.data["sees"], r.data["push"]), "sees": r.data["sees"], "push": r.data["push"],
-                          "source": f"namer:{d.model}", "cost": r.cost})
+        goals = namer_goals(a, s1, run, T, starts)
     else:
         nst = s1 / EXP_DIR / "N" / "state.json"
         if not nst.exists():
@@ -948,8 +1024,18 @@ def main() -> None:
     c.add_argument("--max-luna-usd", type=float, default=0.5)
     c.add_argument("--luna", default="luna", help="the held-out judge (fake for dry runs)")
     c.add_argument("--dir", default=None, help=f"the expedition folder (default {EXP_DIR}; arms = v1)")
+    k = sub.add_parser("captions", help="arm N's goal captions (v4 step 1); arm L's are hand-written in " + CAPTIONS_L)
+    k.add_argument("--run", required=True, help="the base run (the namer's typical worlds)")
+    k.add_argument("--out", required=True, help="this seed's Stage 1 folder (triggers, the namer's cache)")
+    k.add_argument("--dest", default=None, help="where N.json, N.md and the caption cache go (default <out>/captions)")
+    k.add_argument("--config", default=None)
+    k.add_argument("--seed", type=int, default=0)
+    k.add_argument("--vlm", default="gemini-pro", help="the namer whose cached answers are N's goals (no new calls)")
+    k.add_argument("--caption-vlm", default="gemini-pro", help="writes the captions (gemini-pro-or: the same model via OpenRouter; fake for a dry run)")
+    k.add_argument("--limit", type=int, default=0, help="only the first k triggers")
+    k.add_argument("--max-vlm-usd", type=float, default=0.25, help="hard cap on the caption cache's total spend")
     a = ap.parse_args()
-    {"triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check, "goalcheck": goalcheck,
+    {"captions": captions, "triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check, "goalcheck": goalcheck,
      "heritability": heritability}[a.cmd](a)
 
 

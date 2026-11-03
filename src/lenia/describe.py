@@ -123,8 +123,9 @@ class Cache:
 
 
 class Describer:
-    def __init__(self, name: str, cfg: dict, cache_path, max_usd: float = 0.0, log=None):
+    def __init__(self, name: str, cfg: dict, cache_path, max_usd: float = 0.0, log=None, cache_only: bool = False):
         self.name, self.cfg = name, cfg
+        self.cache_only = cache_only           # answer from the cache only, like LENIA_VLM_CACHE_ONLY but for this describer
         self.backend = cfg["backend"]
         if self.backend not in ("vertex", "openrouter", "fake"):
             raise ValueError(f"unknown VLM backend {self.backend!r}")
@@ -160,7 +161,7 @@ class Describer:
                 raise BudgetError(f"[{desc} {self.name}] spent ${so_far:.2f}; {len(todo)} more calls (~${est:.2f}) would pass "
                                   f"the cap of ${self.cap:.2f}. Nothing was called; re-run with a higher cap.")
         res = {}
-        if todo and os.environ.get("LENIA_VLM_CACHE_ONLY"):           # answer from the cache only; make no calls
+        if todo and (self.cache_only or os.environ.get("LENIA_VLM_CACHE_ONLY")):           # answer from the cache only; make no calls
             self.log(f"[{desc} {self.name}] LENIA_VLM_CACHE_ONLY: {len(todo)} uncached asks left unanswered")
             res = {keys[i]: Answer(None, "not cached (LENIA_VLM_CACHE_ONLY)") for i in todo}
             todo = []
@@ -177,7 +178,7 @@ class Describer:
                     elif n <= 3:
                         self.log(f"[{desc} {self.name}] failed call: {a.raw[:300]}")
                     res[keys[i]] = a
-        if len(res) >= 3 and not any(a.ok for a in res.values()) and not os.environ.get("LENIA_VLM_CACHE_ONLY"):
+        if len(res) >= 3 and not any(a.ok for a in res.values()) and not (self.cache_only or os.environ.get("LENIA_VLM_CACHE_ONLY")):
             raise FatalAPIError(f"[{desc} {self.name}] all {len(res)} new calls failed; first: {next(iter(res.values())).raw[:300]}")
         final = [v if v is not None else res[k] for v, k in zip(out, keys)]
         n_fail = sum(not a.ok for a in final)

@@ -208,6 +208,30 @@ GEN.setdefault(GOAL_JUDGE, {
     "fields": ["choice", "why"]})
 
 
+# Goal captions (Stage 1 v4, 11-02): the CLIP shortlist (48 children -> CLIP keeps the 16 closest to a caption that pass
+# the motion floor -> Jev picks) is used only for goals whose end state can be pictured. CLIP scores one still, the
+# bottom-right snapshot, so the caption describes that still; "none" sends the goal to the motion floor + a random 16.
+# "start" captions the same aspect of the start world, for directional (change) scoring: CLIP's image change start ->
+# child against the text change start -> end (Gal et al. 2021, StyleGAN-NADA). Arm L's library goals get hand-written
+# captions in the same form (data/goal_library_v3_captions.json). No colours: a colour caption would let the shortlist
+# select channel colour, not structure.
+CAPTION = "goal_caption_v1"
+GEN.setdefault(CAPTION, {
+    "system": _GEN_SYSTEM + " Here you turn one goal into short picture captions for CLIP, an image-text model that "
+              "helps shortlist the descendants that look most like the goal's end state.",
+    "user": ("Image 1 is the world an expedition starts from. " + _FRAMES + "\nWhat it shows: {sees}\n"
+             "The goal for its descendants: {push}\n\nCLIP sees only the last snapshot (bottom-right) of each world, as a single "
+             "still picture, and scores how well it matches a caption. Return {\"end\": ..., \"start\": ...}:\n"
+             "- end: what the last snapshot would show once the goal is reached, as a plain caption of 3 to 8 words, a "
+             "noun phrase like the caption under a photo. Describe shapes, parts and how they are arranged, in everyday "
+             "words; no colours, no words about movement, speed or timing, no Lenia or chemistry terms. If what the goal "
+             "asks for is movement, rhythm or a change between snapshots, so that a world that reached it would look no "
+             "different in one still, answer \"none\".\n"
+             "- start: a caption of the same kind for the last snapshot of Image 1, describing the same aspect the goal "
+             "changes, so the two captions differ mainly in what the goal changes; \"none\" if end is \"none\"."),
+    "fields": ["end", "start"]})
+
+
 # ---------- lookup ----------
 
 def get_prompt(prompt_id: str) -> dict[str, str]:

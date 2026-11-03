@@ -1,0 +1,122 @@
+[
+ {
+  "id": "h062",
+  "group": "change",
+  "sees": "the world changes a lot between snapshots and looks chaotic",
+  "push": "calm it into a few stable, recognisable bodies",
+  "end": "a few separate smooth round bodies",
+  "start": "a chaotic scatter of ragged fragments",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": ""
+ },
+ {
+  "id": "h058",
+  "group": "change",
+  "sees": "the body clearly changes shape between snapshots",
+  "push": "make the shape change rhythmic, like a heartbeat",
+  "end": "none",
+  "start": "none",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": "rhythm over time; a still can't show it"
+ },
+ {
+  "id": "h016",
+  "group": "shape",
+  "sees": "a star-shaped body with pointed rays",
+  "push": "lengthen the rays into arms with something at their tips",
+  "end": "a starfish with long arms ending in knobs",
+  "start": "a small star with short pointed rays",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": ""
+ },
+ {
+  "id": "h002",
+  "group": "interior",
+  "sees": "a body whose inside is a pattern of curving stripes, like a maze or fingerprint",
+  "push": "make the stripes circulate around the inside",
+  "end": "none",
+  "start": "none",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": "circulation is motion; the stripes look the same in a still"
+ },
+ {
+  "id": "h046",
+  "group": "surroundings",
+  "sees": "a wide field of wavy fingerprint-like lines surrounds the body",
+  "push": "make the field shrink into a tight protective layer",
+  "end": "a round body wrapped in a thin shell",
+  "start": "a body inside a wide fingerprint pattern",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": ""
+ },
+ {
+  "id": "h036",
+  "group": "surroundings",
+  "sees": "an evenly spaced ring of small round cells surrounds the main body at a distance",
+  "push": "make the ring of cells orbit the main body",
+  "end": "none",
+  "start": "none",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": "orbiting is motion"
+ },
+ {
+  "id": "h055",
+  "group": "bodies",
+  "sees": "a big body and several much smaller ones",
+  "push": "make the big body chase or engulf the small ones",
+  "end": "none",
+  "start": "none",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": "chasing / engulfing happens over time; the end still is ambiguous"
+ },
+ {
+  "id": "h060",
+  "group": "change",
+  "sees": "the small surrounding bodies change position between snapshots",
+  "push": "make them move in a coordinated way, like a swarm",
+  "end": "none",
+  "start": "none",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": "coordinated movement"
+ },
+ {
+  "id": "h023",
+  "group": "shape",
+  "sees": "an elongated or bean-shaped body",
+  "push": "make it move along its long axis like a swimming cell",
+  "end": "none",
+  "start": "none",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": "swimming is motion"
+ },
+ {
+  "id": "h025",
+  "group": "shape",
+  "sees": "a curved tube or worm-like body",
+  "push": "make the worm crawl or curl over time",
+  "end": "none",
+  "start": "none",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": "crawling or curling over time"
+ },
+ {
+  "id": "h026",
+  "group": "shape",
+  "sees": "a long chain of beads linked together",
+  "push": "make the chain wave like a swimming tail",
+  "end": "a long wavy chain of beads",
+  "start": "a long straight chain of beads",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": "borderline: a still can show the wave shape, not the waving"
+ },
+ {
+  "id": "h048",
+  "group": "surroundings",
+  "sees": "the body sits on a dark, empty background with nothing around it",
+  "push": "make it produce something in the space around it",
+  "end": "a body surrounded by many small specks",
+  "start": "a single body on an empty background",
+  "by": "hand (Claude, 11-02; Felix to check)",
+  "note": "the push is vague ('something'); specks is one reading"
+ }
+]

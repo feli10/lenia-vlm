@@ -60,6 +60,16 @@ vlms:                                  # generative VLMs (lenia.describe); scrip
     est_cost_per_call_usd: 0.006     # measured 0.0048 per namer call, 10-29
     max_workers: 2                     # Vertex 429s (shared capacity for new models): fewer in parallel,
     max_retries: 8                     # and back off for up to ~6 minutes (10-29)
+  gemini-pro-or:                       # gemini-pro through OpenRouter: the fallback if Vertex is unavailable (the project
+    backend: openrouter                # was flagged 10-29, reinstated 11-02); the same model, but its own cache entries
+    model: google/gemini-4-argon       # confirm with `bakeoff.py ping --models gemini-pro-or` before spending
+    usd_per_m_input: 2.0               # same as Vertex; $4 / $20 from 2026-12-01 (OpenRouter's usage report wins)
+    usd_per_m_output: 10.0
+    thinking: {effort: low}
+    temperature: 1.0
+    max_output_tokens: 4096
+    est_cost_per_call_usd: 0.006       # assumed: one 644-px picture (a namer call with 5 was 0.0128)
+    max_workers: 2
   qwen-8b:
     backend: openrouter                # cost comes from OpenRouter's usage report
     model: qwen/qwen3-vl-8b-instruct
