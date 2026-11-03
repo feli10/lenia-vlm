@@ -12,6 +12,20 @@ Goal captions for the v4 CLIP shortlist (--arm N or L; hand captions for L's see
   PYTHONPATH=src:scripts python3 scripts/stage1.py captions --run runs/mace-qd5-sarch-s0 --out runs/stage1-s0 \\
       --caption-vlm fake --dest /tmp/cap-dry
 
+Caption check (v4 step 2; Colab, GPU, no API calls; regrows expedition v3's arm L children):
+
+  python scripts/stage1.py capcheck --run RUNS/mace-qd5-sarch-s0 --out RUNS/stage1-s0 --backend auto --evals /content/capcheck-evals
+  PYTHONPATH=src:scripts python3 scripts/stage1.py capcheck --run runs/mace-qd5-sarch-s0 --out runs/stage1-s0 --clip fake \\
+      --limit 1 --steps 2 --size 48 --warmup 20 --render 12 --gap 4 --dry --evals /tmp/cc-dry
+
+Expedition v4 (Colab: GPU and Jev; see colab/mace.ipynb section 5c). Smoke test first, then the arms:
+
+  python scripts/stage1.py v4 --arm N --run RUNS/mace-qd5-sarch-s0 --out RUNS/stage1-s0 --backend auto --evals /content/evals \\
+      --tag exp-v4-smoke --limit 2 --stop-after 3
+  python scripts/stage1.py v4 --arm L --run RUNS/mace-qd5-sarch-s0 --out RUNS/stage1-s0 --backend auto --evals /content/evals
+  ... then --arm N, NF, C. Results in <out>/exp-v4/<arm>/: state.json, duels.csv (every child), trace.jsonl (picks),
+  sheet.png (start | halfway | end), summary.md.
+
 Step 5 on, the expeditions (Colab: GPU and judge calls; see colab/mace.ipynb):
 
   python scripts/stage1.py expedition --arm L  --run RUNS/mace-qd5-sarch-s0 --out RUNS/stage1-s0 --backend auto
@@ -56,7 +70,7 @@ import mace_qd as QD
 from lenia import backend
 from lenia.config import REPO_ROOT, load
 from lenia.judge import BudgetError, ChoiceQuery, Judge, MultiQuery, Query, load_env
-from lenia.mace import mutate
+from lenia.mace import TILE as ME_TILE, mutate
 from lenia.prompts import (CAPTION, COMPLEXITY, NAMER, NONE, REVIEW_R, REVIEW_S, SESSION_MATCH, STEER, SURPRISE, attain_prompt,
                            steer_prompt)
 from lenia.sim import Rule
@@ -465,6 +479,352 @@ def captions(a) -> None:
     print(f"wrote {dest / (a.arm + '.json')}", file=sys.stderr)
 
 
+# ---------- caption check (v4 step 2, 11-03): which CLIP score predicts Jev's picks? ----------
+#
+# v4 shortlists children by CLIP before Jev chooses. Two ways to score a child against a goal caption:
+# - target: cos(child, text(end)), what round 4's shortlist used (ASAL, Kumar et al. 2024);
+# - change: cos(child - start, text(end) - text(start)), directional CLIP (Gal et al. 2021, StyleGAN-NADA).
+# Offline and free of API calls: expedition v3's arm L children are regrown (their pictures were not kept: the
+# simulation cache was on Colab's local disk), and each is scored both ways against the goal's captions; Jev's goal
+# score for every child is already in duels.csv. Per (trigger, step): Spearman rho between each CLIP score and Jev's,
+# over that step's judged children, and whether the child Jev picked (highest goal score passing the floor) lands in
+# CLIP's top third (v4 keeps 16 of 48; chance = 1/3). Hand captions (CAPTIONS_L) are scored too, as a check on the
+# captioner. Only captioned goals enter. Caveat: v3 mutated at 0.3, so siblings are close and every rho is range-
+# restricted; the comparison between scores is fair, the absolute values understate what v4's 2.0 -> 0.8 would show.
+# Reproduction is checked before anything is scored: every accepted child's simulation-cache key must equal the one in
+# trace.jsonl (mutation reproduces bit for bit; x86 only, as the run), and the regrown pictures of accepted children
+# are compared with the copies kept in <out>/evals (the simulation reproduces on this GPU).
+# Ours: the check and its design. From papers: CLIP target scoring (ASAL), directional CLIP (Gal et al. 2021).
+
+V3_SCALE, V3_STRUCT = 0.3, 0.0           # expedition v3's mutation, pinned here (v4 changes MUT_SCALE / STRUCT)
+
+
+def _spearman(x, y) -> float | None:
+    x, y = np.asarray(x, float), np.asarray(y, float)
+    if len(x) < 4 or x.std() == 0 or y.std() == 0:
+        return None
+    rx, ry = np.argsort(np.argsort(x)), np.argsort(np.argsort(y))
+    return float(np.corrcoef(rx, ry)[0, 1])
+
+
+def capcheck(a) -> None:
+    from lenia.embed import ClipScorer
+    s1, run = Path(a.out), Path(a.run)
+    adir = s1 / "exp-v3" / "L"
+    dest = s1 / "capcheck"
+    dest.mkdir(parents=True, exist_ok=True)
+    backend.configure(a.backend)
+    ea = eval_settings(run, a)
+    st = json.loads((adir / "state.json").read_text())
+    caps = {r["trigger"]: r for r in json.loads((s1 / "captions" / "L.json").read_text())}
+    hand = load_captions(REPO_ROOT / CAPTIONS_L)
+    trace = [json.loads(x) for x in (adir / "trace.jsonl").read_text().splitlines() if x.strip()]
+    duels = list(csv.DictReader(open(adir / "duels.csv")))
+    T = [tr for tr in st["triggers"] if caps.get(tr["id"], {}).get("end", "none") != "none"][:a.limit or None]
+    steps = min(st["steps"], a.steps or st["steps"])
+    M = st["mutants"]
+    evals = Evals(Path(a.evals) if a.evals else Path("/tmp/capcheck-evals"), ea)
+    clip = ClipScorer(a.clip)
+    tile = lambda pic: np.asarray(pic)[-ME_TILE:, -ME_TILE:]
+    rows, repro = [], {"keys": 0, "keys_ok": 0, "pics": 0, "pic_diff": []}
+    for tr in T:
+        c = caps[tr["id"]]
+        texts = {"gemini": (c["end"], c["start"])}
+        h = hand.get(tr["goals"][0]["id"])
+        if h and h["end"] != "none":
+            texts["hand"] = (h["end"], h["start"])
+        start = _pic(s1, tr["start"])
+        e0 = clip.images([tile(start)])[0]
+        acc = {t["step"]: t for t in trace if t["trigger"] == tr["id"]}
+        parent = tr["start_rule"]
+        for step in range(1, steps + 1):
+            rng = np.random.default_rng([st["seed"], tr["index"], step])
+            kids = mutants_of(Rule.from_dict(parent), rng, M, ea, V3_SCALE, V3_STRUCT)
+            ev = evals.get_many(kids)
+            jev = {int(d["mutant"]): d for d in duels if d["trigger"] == tr["id"] and int(d["step"]) == step and d["goal"]}
+            if step in acc:                    # reproduction: the accepted child is one of these, by key and by picture
+                repro["keys"] += 1
+                key = acc[step]["image"].split("/")[-1][:-4]
+                hit = [j for j, v in enumerate(ev) if v["key"] == key]
+                repro["keys_ok"] += bool(hit)
+                kept = s1 / acc[step]["image"]
+                if hit and kept.exists():
+                    repro["pics"] += 1
+                    repro["pic_diff"].append(float(np.abs(np.asarray(Image.open(kept).convert("RGB"), np.int16)
+                                                          - ev[hit[0]]["pic"].astype(np.int16)).mean()))
+            js = sorted(jev)
+            if len(js) >= 4:
+                E = clip.images([tile(ev[j]["pic"]) for j in js])
+                G = [float(jev[j]["goal"]) for j in js]
+                ok = [int(jev[j]["accepted"]) for j in js]
+                pick = max((g, j) for g, j, o in zip(G, js, ok) if o)[1] if any(ok) else None
+                r = {"trigger": tr["id"], "step": step, "n": len(js), "jev_sd": round(float(np.std(G)), 4)}
+                for who, (end, beg) in texts.items():
+                    te, ts = clip.text(end), clip.text(beg)
+                    d = te - ts
+                    d = d / max(np.linalg.norm(d), 1e-9)
+                    dimg = E - e0
+                    dimg = dimg / np.maximum(np.linalg.norm(dimg, axis=1, keepdims=True), 1e-9)
+                    for kind, sc in (("target", E @ te), ("change", dimg @ d)):
+                        r[f"{who}_{kind}_rho"] = _spearman(sc, G)
+                        if pick is not None:
+                            rank = int((sc > sc[js.index(pick)]).sum())
+                            r[f"{who}_{kind}_top3"] = int(rank < max(1, round(len(js) / 3)))
+                rows.append(r)
+            if step in acc:
+                parent = acc[step]["rule"]
+        print(f"{tr['id']}: {steps} steps scored", file=sys.stderr)
+    if repro["keys"] and repro["keys_ok"] < repro["keys"] and not a.dry:
+        sys.exit(f"mutation did not reproduce: {repro['keys_ok']} of {repro['keys']} accepted children found by key "
+                 "(run on Colab, x86, as expedition v3 did). Nothing was scored.")
+    (dest / "results.json").write_text(json.dumps({"rows": rows, "repro": repro, "clip": a.clip}, indent=1))
+    mean = lambda v: float(np.mean(v)) if v else float("nan")
+    L = ["# Caption check: which CLIP score predicts Jev's picks? (expedition v3, arm L, captioned goals)\n",
+         f"Reproduction: {repro['keys_ok']} of {repro['keys']} accepted children found by key; regrown vs kept "
+         f"pictures, mean |pixel difference| {mean(repro['pic_diff']):.2f} of 255 over {repro['pics']}.\n",
+         f"{len(rows)} trigger-steps; Spearman rho with Jev's goal score among each step's children, and how often Jev's "
+         "pick is in CLIP's top third (chance 0.33).\n",
+         "| captions | score | mean rho | rho > 0 | pick in top third |", "|---|---|---|---|---|"]
+    for who in ("gemini", "hand"):
+        for kind in ("target", "change"):
+            rh = [r[f"{who}_{kind}_rho"] for r in rows if r.get(f"{who}_{kind}_rho") is not None]
+            t3 = [r[f"{who}_{kind}_top3"] for r in rows if f"{who}_{kind}_top3" in r]
+            if rh:
+                L.append(f"| {who} | {kind} | {mean(rh):+.3f} | {sum(x > 0 for x in rh)}/{len(rh)} | {mean(t3):.2f} ({len(t3)}) |")
+    L += ["\nPer trigger (gemini captions, mean rho target / change):"]
+    for tid in dict.fromkeys(r["trigger"] for r in rows):
+        rr = [r for r in rows if r["trigger"] == tid]
+        f = lambda k: mean([r[k] for r in rr if r.get(k) is not None])
+        L.append(f"- {tid} ({caps[tid]['end']}): {f('gemini_target_rho'):+.3f} / {f('gemini_change_rho'):+.3f}")
+    (dest / "report.md").write_text("\n".join(L) + "\n")
+    print("\n".join(L))
+
+
+# ---------- expedition v4 (11-03; project doc "Stage 1 direction - goal steering") ----------
+#
+# The step Felix rated best on the CLIP bench (jev-v4: 6 of 7 blind pairs against CLIP-driven search over 40 steps;
+# the CLIP shortlist 9-3 against plain Jev over rounds 3-4), ported to the trigger expeditions. Every step, per trigger:
+# 48 mutants of the parent (mutation 2.0 -> 0.8, geometric over 20 steps, no ring edits), each grown from the fixed
+# noise start; grid-filling texture dropped. Then a shortlist of 16:
+# - "clip" route (the goal has a picture caption): the 16 closest to the caption by CLIP (target score, the bench's
+#   choice; directional scoring is untested, stage1.py capcheck can test it later), among children with motion >= 1.0;
+# - "floor" route (caption "none"): 16 at random among children with motion >= 1.0 (bench jev-floor).
+# Jev scores the 16 against the trigger's start in one combined request per order (goal progress = attain_prompt,
+# unchanged from the bench; complexity; surprise), and the best goal score whose complexity is >= K_FLOOR replaces the
+# parent (comma selection; if none passes, the parent stays).
+# Arms (goals and captions from <out>/captions/<arm>.json; N's goals from the namer's cached answers):
+#   L  = library goals;  N = VLM-written goals;
+#   NF = N's goals forced onto the floor route, only on the triggers whose L goal has no caption, so N vs L can be
+#        compared there with no CLIP help on either side (11-02: coverage differs, N 12/12 captioned, L 6/12);
+#   C  = N's goals steered by CLIP alone (ASAL-style baseline, Kumar et al. 2024): the child closest to the caption (or
+#        the push text when the caption is "none") among texture-passing children; no Jev, no motion floor.
+# Mutation randomness is seeded by (trigger, step), so all arms draw the same step-1 children and share their
+# simulations. Kept deliberately the same as the bench (untested changes wait): the attain prompt's wording, the
+# motion floor of 1.0, target CLIP scoring. Added from the expeditions: the complexity floor against the start.
+# Logged per step: CLIP's mean over all valid children (unselected, so not inflated), mean motion, Jev's mean over the
+# judged 16 (shortlisted, so biased upward under the clip route), and the pick.
+# Ours: the trigger expedition, the routes, arms NF and C. From papers: comma selection ((1,lambda)-ES; Rechenberg,
+# Schwefel), CLIP text targets for search (ASAL), foundation-model goals steering evolution (ASAL; the Picbreeder line).
+
+V4_DIR, V4_ARMS = "exp-v4", ("L", "N", "NF", "C")
+V4_STEPS, V4_CHILDREN, V4_JUDGED = 20, 48, 16
+V4_SCHED, V4_MOTION = (2.0, 0.8), 1.0
+
+
+def v4_scale(step: int, steps: int) -> float:
+    s0, s1 = V4_SCHED
+    return float(s0 * (s1 / s0) ** ((step - 1) / max(1, steps - 1)))
+
+
+def v4_setup(a, s1: Path, run: Path, judge) -> dict:
+    T = json.loads((s1 / "triggers.json").read_text())["triggers"]
+    starts = [_pic(s1, f"img/{t['image']}") for t in T]
+    src = "L" if a.arm == "L" else "N"
+    goals = library_goals(a, judge, starts) if src == "L" else namer_goals(a, s1, run, T, starts, cache_only=True)
+    capf = s1 / "captions" / f"{src}.json"
+    if not capf.exists():
+        sys.exit(f"{capf} is missing: run `stage1.py captions --arm {src}` first")
+    caps = {r["trigger"]: r for r in json.loads(capf.read_text())}
+    keep = list(range(len(T)))
+    if a.arm == "NF":                        # only where L's goal has no picture caption
+        lcaps = {r["trigger"]: r for r in json.loads((s1 / "captions" / "L.json").read_text())}
+        keep = [i for i, t in enumerate(T) if lcaps[t["id"]]["end"] == "none"]
+    keep = keep[:a.limit or None]
+    trs = []
+    for i in keep:
+        t, g = T[i], goals[i]
+        c = caps.get(t["id"])
+        if c is None or c["id"] != g["id"]:
+            sys.exit(f"{capf}: no caption for {t['id']}'s goal {g['id']} (re-run the captions command)")
+        route = "clip" if a.arm == "C" else "floor" if a.arm == "NF" else ("clip" if c["end"] != "none" else "floor")
+        target = c["end"] if c["end"] != "none" else g["push"]
+        trs.append({"id": t["id"], "index": i, "start": f"img/{t['image']}", "start_rule": t["rule"],
+                    "start_motion": t.get("motion"), "goal": g, "caption": {"end": c["end"], "start": c["start"]},
+                    "route": route, "target": target, "parent_rule": t["rule"], "parent": f"img/{t['image']}",
+                    "g": 0.5, "k": 0.5, "s": 0.5, "history": [], "stats": []})
+    return {"arm": a.arm, "version": V4_DIR, "step": 0, "seed": a.seed, "steps": a.steps, "children": V4_CHILDREN,
+            "judged": V4_JUDGED, "sched": list(V4_SCHED), "motion_floor": a.motion_floor, "k_floor": K_FLOOR, "triggers": trs}
+
+
+def expedition_v4(a) -> None:
+    from lenia.embed import ClipScorer
+    s1, run = Path(a.out), Path(a.run)
+    adir = s1 / a.tag / a.arm
+    adir.mkdir(parents=True, exist_ok=True)
+    backend.configure(a.backend)
+    ea = eval_settings(run, a)
+    judge = None if a.arm == "C" else _judges(a, s1)
+    if (adir / "state.json").exists():
+        st = json.loads((adir / "state.json").read_text())
+        print(f"arm {a.arm}: resuming after step {st['step']}", file=sys.stderr)
+    else:
+        st = v4_setup(a, s1, run, judge or _judges(a, s1))
+        QD.save_state(adir, st)
+        for tr in st["triggers"]:
+            print(f"{tr['id']} [{tr['route']}] {tr['goal']['push']}  ->  CLIP target: {tr['target']}", file=sys.stderr)
+    evals = Evals(Path(a.evals) if a.evals else s1 / "evals", ea, keep=s1 / "evals")
+    if st["step"] == 0:
+        t0 = json.loads((s1 / "triggers.json").read_text())["triggers"][0]    # the same trigger for every arm
+        same_platform(s1, evals, st, ea, tag=f"{V4_DIR} sched={V4_SCHED[0]}-{V4_SCHED[1]} struct=0", scale=V4_SCHED[0],
+                      struct=0.0, tr={"start_rule": t0["rule"], "index": 0})
+    clip = ClipScorer(a.clip)
+    tile = lambda pic: np.asarray(pic)[-ME_TILE:, -ME_TILE:]
+    starts = {tr["index"]: _pic(s1, tr["start"]) for tr in st["triggers"]}
+    stop = min(st["steps"], a.stop_after or st["steps"])
+    while st["step"] < stop:
+        step, t0 = st["step"] + 1, time.time()
+        scale = v4_scale(step, st["steps"])
+        rules, owner = [], []
+        for tr in st["triggers"]:
+            rng = np.random.default_rng([st["seed"], tr["index"], step])      # the same draws in every arm
+            for m in mutants_of(Rule.from_dict(tr["parent_rule"]), rng, st["children"], ea, scale, 0.0):
+                rules.append(m)
+                owner.append(tr["index"])
+        ev = evals.get_many(rules)
+        emb = clip.images([tile(v["pic"]) for v in ev])
+        byi = {tr["index"]: tr for tr in st["triggers"]}
+        short, csc, rows = {}, {}, []
+        for i, tr in byi.items():
+            ks = [j for j, o in enumerate(owner) if o == i]
+            cs = emb[ks] @ clip.text(tr["target"])
+            csc.update(zip(ks, cs.tolist()))
+            ok = [ea.max_texture <= 0 or ev[j]["texture"] <= ea.max_texture for j in ks]
+            if a.arm == "C":
+                short[i] = [ks[n] for n in np.argsort(-cs) if ok[n]][:1]
+                continue
+            fl = [o and ev[j]["motion"] >= st["motion_floor"] for o, j in zip(ok, ks)]
+            if tr["route"] == "clip":
+                order = [ks[n] for n in np.argsort(-cs) if fl[n]]
+            else:
+                rr = np.random.default_rng([st["seed"], tr["index"], step, 7]).permutation(len(ks))
+                order = [ks[n] for n in rr if fl[n]]
+            short[i] = order[:st["judged"]]
+        jv = {}
+        if a.arm != "C":
+            mq, meta = [], []
+            for i, js in short.items():
+                pids = (attain_prompt(byi[i]["goal"]), COMPLEXITY, SURPRISE)
+                for j in js:
+                    mq += [MultiQuery(pids, ev[j]["pic"], starts[i]), MultiQuery(pids, starts[i], ev[j]["pic"])]
+                    meta.append(j)
+            vs = judge.judge_multi(mq, desc=f"v4 {a.arm} step {step}")
+            if any(not all(v.ok for v in vv) for vv in vs):
+                sys.exit("some judge requests failed (not cached); re-run to retry them (the step restarts)")
+            both = lambda x, y, q: 0.5 * (x[q].p_first + 1 - y[q].p_first)
+            for n, j in enumerate(meta):
+                x, y = vs[2 * n], vs[2 * n + 1]
+                jv[j] = (both(x, y, 0), both(x, y, 1), both(x, y, 2))
+        for i, tr in byi.items():
+            ks = [j for j, o in enumerate(owner) if o == i]
+            if a.arm == "C":
+                pick = short[i][0] if short[i] else None
+            else:
+                cand = [(jv[j][0], jv[j][1], j) for j in short[i] if jv[j][1] >= st["k_floor"]]
+                pick = max(cand)[2] if cand else None
+            valid = [j for j in ks if ea.max_texture <= 0 or ev[j]["texture"] <= ea.max_texture]
+            rec = {"step": step, "scale": round(scale, 4), "valid": len(valid), "floor": sum(ev[j]["motion"] >= st["motion_floor"]
+                   for j in valid), "judged": len(short[i]) if a.arm != "C" else 0,
+                   "clip_mean": round(float(np.mean([csc[j] for j in valid])), 4) if valid else None,
+                   "motion_mean": round(float(np.mean([ev[j]["motion"] for j in valid])), 4) if valid else None,
+                   "jev_mean_judged": round(float(np.mean([jv[j][0] for j in short[i]])), 4) if jv and short[i] else None,
+                   "moved": pick is not None}
+            tr["stats"].append(rec)
+            for j in ks:
+                g, k, s_ = jv.get(j, (None, None, None))
+                rows.append([step, tr["id"], ks.index(j), round(ev[j]["texture"], 4), round(ev[j]["motion"], 4),
+                             round(csc[j], 4), int(j in short[i]), *(None if v is None else round(v, 4) for v in (g, k, s_)),
+                             int(j == pick)])
+            if pick is not None:
+                evals.persist(ev[pick])
+                tr["parent_rule"], tr["parent"] = rules[pick].to_dict(), ev[pick]["image"]
+                if a.arm != "C":
+                    tr["g"], tr["k"], tr["s"] = (round(v, 4) for v in jv[pick])
+                h = {"step": step, "image": ev[pick]["image"], "goal_score": tr["g"] if a.arm != "C" else None,
+                     "complexity": tr["k"] if a.arm != "C" else None, "surprise": tr["s"] if a.arm != "C" else None,
+                     "clip": round(csc[pick], 4), "motion": round(ev[pick]["motion"], 4), "bodies": ev[pick]["bodies"]}
+                tr["history"].append(h)
+                tr["_trace"] = {"arm": a.arm, "trigger": tr["id"], **h, "rule": rules[pick].to_dict()}
+        st["step"] = step
+        QD.save_state(adir, st)                # state first, then the logs (a crash re-runs the step from its cache)
+        new = not (adir / "duels.csv").exists()
+        with open(adir / "duels.csv", "a", newline="") as fh:
+            w = csv.writer(fh)
+            if new:
+                w.writerow(["step", "trigger", "child", "texture", "motion", "clip", "shortlisted", "goal", "complexity",
+                            "surprise", "picked"])
+            w.writerows(rows)
+        with open(adir / "trace.jsonl", "a") as fh:
+            for tr in st["triggers"]:
+                if tr.get("_trace", {}).get("step") == step:
+                    fh.write(json.dumps(tr["_trace"]) + "\n")
+        print(f"v4 {a.arm} step {step}/{st['steps']} (scale {scale:.2f}): {len(rules)} children in {time.time() - t0:.0f}s; "
+              f"moved {sum(tr['stats'][-1]['moved'] for tr in st['triggers'])}/{len(st['triggers'])}; CLIP mean "
+              f"{np.nanmean([tr['stats'][-1]['clip_mean'] or np.nan for tr in st['triggers']]):.3f}", file=sys.stderr)
+    for tr in st["triggers"]:
+        tr.pop("_trace", None)
+    QD.save_state(adir, st)
+    if st["step"] >= stop:
+        v4_sheet(s1, st, adir / "sheet.png")
+        v4_summary(st, adir / "summary.md")
+        print(f"arm {a.arm}: {st['step']} of {st['steps']} steps; {adir / 'sheet.png'}, {adir / 'summary.md'}", file=sys.stderr)
+
+
+def v4_sheet(s1: Path, st: dict, path: Path, px: int = 260) -> None:
+    """One row per trigger: start | the parent halfway | the end, with the goal, route and CLIP target."""
+    head, cols = 42, 3
+    im = Image.new("RGB", (cols * (px + 8) + 8, len(st["triggers"]) * (px + head + 10) + 10), (250, 250, 250))
+    d = ImageDraw.Draw(im)
+    f1, f2 = _font(14), _font(11)
+    for n, tr in enumerate(st["triggers"]):
+        y = 10 + n * (px + head + 10)
+        hs = tr["history"]
+        mid = next((h["image"] for h in reversed(hs) if h["step"] <= st["step"] // 2), tr["start"])
+        d.text((8, y), f"{tr['id']} [{tr['route']}]  moved {len(hs)}/{st['step']} steps  "
+               + (f"goal {tr['g']:.2f}  complexity {tr['k']:.2f}" if st["arm"] != "C" else "CLIP only"),
+               fill="black", font=f1)
+        d.text((8, y + 18), (tr["goal"]["push"][:70] + " | " + tr["target"])[:120], fill=(70, 70, 70), font=f2)
+        for c, rel in enumerate((tr["start"], mid, tr["parent"])):
+            im.paste(Image.open(s1 / rel).convert("RGB").resize((px, px), Image.BILINEAR), (8 + c * (px + 8), y + head))
+    im.save(path)
+
+
+def v4_summary(st: dict, path: Path) -> None:
+    L = [f"# Expedition v4, arm {st['arm']}, seed {st['seed']}: {st['step']} of {st['steps']} steps\n",
+         "Jev's goal and complexity scores are the end parent against the start (0.5 = no change). CLIP mean = all "
+         "valid children's mean CLIP score against the target (unselected); Jev mean = the judged shortlist's (biased "
+         "upward under the clip route).\n",
+         "| trigger | route | moved | goal | complexity | CLIP mean, step 1 -> last | motion, step 1 -> last | Jev mean judged, 1 -> last |",
+         "|---|---|---|---|---|---|---|---|"]
+    f = lambda v: "-" if v is None else f"{v:.2f}"
+    for tr in st["triggers"]:
+        a, b = tr["stats"][0], tr["stats"][-1]
+        L.append(f"| {tr['id']} | {tr['route']} | {len(tr['history'])}/{st['step']} | "
+                 + (f"{tr['g']:.2f} | {tr['k']:.2f}" if st["arm"] != "C" else "- | -")
+                 + f" | {f(a['clip_mean'])} -> {f(b['clip_mean'])} | {f(a['motion_mean'])} -> {f(b['motion_mean'])} | "
+                   f"{f(a['jev_mean_judged'])} -> {f(b['jev_mean_judged'])} |")
+    path.write_text("\n".join(L) + "\n")
+
+
 def setup_arm(a, s1: Path, run: Path, T: list, judge) -> dict:
     """The arm's goal per trigger, and the starting state."""
     starts = [_pic(s1, f"img/{t['image']}") for t in T]
@@ -549,15 +909,17 @@ def mutants_of(par: Rule, rng, n: int, ea, scale: float = MUT_SCALE, struct: flo
     return out
 
 
-def same_platform(s1: Path, evals: "Evals", st: dict, ea) -> None:
+def same_platform(s1: Path, evals: "Evals", st: dict, ea, tag: str | None = None, scale: float = MUT_SCALE,
+                  struct: float = STRUCT, tr: dict | None = None) -> None:
     """Shared mutation randomness only holds if every arm draws bit-identical mutants (np.exp differs in the last bit
     between x86 and ARM; NumPy may change between Colab images). The first arm records the first trigger's first 8
     step-1 mutants (their simulation-cache keys) in <out>/mutation_fingerprint.json; every later arm must match."""
     import hashlib
-    tr = st["triggers"][0]
-    ms = mutants_of(Rule.from_dict(tr["start_rule"]), np.random.default_rng([st["seed"], tr["index"], 1]), 8, ea)
+    tr = tr or st["triggers"][0]
+    ms = mutants_of(Rule.from_dict(tr["start_rule"]), np.random.default_rng([st["seed"], tr["index"], 1]), 8, ea,
+                    scale, struct)
     fp = hashlib.sha1("".join(evals.key(m) for m in ms).encode()).hexdigest()[:16]
-    tag = f"{EXP_DIR} scale={MUT_SCALE} struct={STRUCT}"
+    tag = tag or f"{EXP_DIR} scale={MUT_SCALE} struct={STRUCT}"
     f = s1 / "mutation_fingerprint.json"
     known = json.loads(f.read_text()) if f.exists() else {}
     if tag not in known:
@@ -1063,8 +1425,44 @@ def main() -> None:
     k.add_argument("--caption-vlm", default="gemini-pro", help="writes the captions (gemini-pro-or: the same model via OpenRouter; fake for a dry run)")
     k.add_argument("--limit", type=int, default=0, help="only the first k triggers")
     k.add_argument("--max-vlm-usd", type=float, default=0.25, help="hard cap on the caption cache's total spend")
+    q = sub.add_parser("capcheck", help="v4 step 2: target vs change CLIP scoring against Jev's picks (Colab; no API calls)")
+    q.add_argument("--run", required=True, help="the base run (simulation settings)")
+    q.add_argument("--out", required=True, help="this seed's Stage 1 folder (exp-v3/L, captions/L.json)")
+    q.add_argument("--backend", default="numpy", help="numpy | auto | cuda | mps")
+    q.add_argument("--evals", default=None, help="simulation cache for the regrown children (default /tmp/capcheck-evals; "
+                   "on Colab /content/capcheck-evals); nothing is written to <out>/evals")
+    q.add_argument("--clip", default="openai/clip-vit-base-patch32", help="CLIP model (fake for a dry run)")
+    q.add_argument("--limit", type=int, default=0, help="only the first k captioned triggers")
+    q.add_argument("--steps", type=int, default=0, help="only the first k steps")
+    q.add_argument("--dry", action="store_true", help="score even if mutation does not reproduce (offline dry runs)")
+    for k in ("size", "warmup", "render", "gap", "sim_batch"):
+        q.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
+    v = sub.add_parser("v4", help="expedition v4: 48 children, CLIP or floor shortlist of 16, Jev picks (arms L, N, NF, C)")
+    v.add_argument("--arm", required=True, choices=V4_ARMS)
+    v.add_argument("--run", required=True, help="the base run")
+    v.add_argument("--out", required=True, help="this seed's Stage 1 folder")
+    v.add_argument("--tag", default=V4_DIR, help=f"results folder under --out (default {V4_DIR}; e.g. exp-v4-smoke)")
+    v.add_argument("--config", default=None)
+    v.add_argument("--backend", default="numpy", help="numpy | auto | cuda | mps")
+    v.add_argument("--judge", default="jev")
+    v.add_argument("--clip", default="openai/clip-vit-base-patch32", help="CLIP model (fake for a dry run)")
+    v.add_argument("--vlm", default="gemini-pro", help="the namer whose cached answers are N's goals (no new calls)")
+    v.add_argument("--library", default="data/goal_library_v3.json")
+    v.add_argument("--seed", type=int, default=0)
+    v.add_argument("--steps", type=int, default=V4_STEPS, help="the schedule's length (fixed at setup)")
+    v.add_argument("--motion-floor", type=float, default=V4_MOTION, help="motion floor for the shortlist (fixed at setup; "
+                   "the bench's 1.0, uncalibrated; 0 for offline dry runs, whose tiny worlds barely move)")
+    v.add_argument("--stop-after", type=int, default=0, help="stop after k steps (smoke tests; resumable)")
+    v.add_argument("--limit", type=int, default=0, help="only the first k of the arm's triggers")
+    v.add_argument("--evals", default=None, help="simulation cache folder (on Colab: /content/evals; picks are copied "
+                   "to <out>/evals)")
+    v.add_argument("--max-usd", type=float, default=6.5, help="hard cap on the --out Jev cache's TOTAL spend (all arms, "
+                   "earlier expeditions included: $3.70 on 11-03)")
+    v.add_argument("--max-vlm-usd", type=float, default=0.0)
+    for k in ("size", "warmup", "render", "gap", "sim_batch"):
+        v.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
     a = ap.parse_args()
-    {"captions": captions, "triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check, "goalcheck": goalcheck,
+    {"v4": expedition_v4, "capcheck": capcheck, "captions": captions, "triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check, "goalcheck": goalcheck,
      "heritability": heritability}[a.cmd](a)
 
 
