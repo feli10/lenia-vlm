@@ -445,7 +445,15 @@ def aimgoals(a) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     T = json.loads((s1 / "triggers.json").read_text())["triggers"][:a.limit or None]
     starts = [_pic(s1, f"img/{t['image']}") for t in T]
-    goals = namer_goals(a, s1, run, T, starts, prompt=NAMER_AIM, aim=a.aim)
+    have = dest / "N-aim.json"
+    locked = (not a.force and have.exists() and
+              all(r.get("prompt") == NAMER_AIM and r.get("aim") == a.aim for r in json.loads(have.read_text())))
+    if locked:                               # never replace goals an arm may already run on with fresh samples
+        print(f"{have} already holds {NAMER_AIM}'s goals for this aim: answering from the cache only (if this stops, "
+              "merge in the cache they were made with, e.g. the Mac's; --force asks the namer again)", file=sys.stderr)
+    goals = namer_goals(a, s1, run, T, starts, cache_only=locked, prompt=NAMER_AIM, aim=a.aim)
+    if locked and [g["id"] for g in goals] != [r["id"] for r in json.loads(have.read_text())][:len(goals)]:
+        sys.exit(f"the cached goals differ from {have}; not overwriting it")
     old = {}
     for arm in ("L", "N"):                   # the goals each trigger had before, from the captions files (no calls)
         f = s1 / "captions" / f"{arm}.json"
@@ -1016,14 +1024,29 @@ def _gif(frames: list, snaps: np.ndarray, path: Path, px: int, fps: int) -> None
     ims[0].save(path, save_all=True, append_images=ims[1:], duration=int(1000 / fps), loop=0, optimize=True)
 
 
+# The aim session (--session aim, 11-04; handoff "Stage 1 aim-conditioned goals", step 4), in <out>/rate-aim/. Same
+# page, films, replay check and report as v4's; its own pairs, all at step 10 (N-aim's end; L's and N's stored
+# step-10 worlds, so every arm has had the same mutations and effort):
+# - interest:Naim-vs-L and interest:Naim-vs-N, all 12 triggers (the Stage 1 question, and whether the new namer helps);
+# - end-vs-start:N-aim and control:N-aim (a random unselected step-1 child of N-aim's, against the start, with N-aim's
+#   goal), all 12 triggers: does steering still show with these goals?
+# The report also splits the interest groups by goal type (goals-aim/goal_types.json, tagged before the run).
+RATE_DIRS = {"v4": "rate-v4", "aim": "rate-aim"}
+
+
 def v4rate(a) -> None:
     import hashlib
     s1 = Path(a.out)
-    rdir = s1 / "rate-v4"
+    rdir = s1 / RATE_DIRS[a.session]
     if a.step == "rate":
         from lenia.rating import rate_pairs
         return rate_pairs(rdir, port=a.port)
     if a.step == "report":
+        if a.session == "aim":
+            gt = s1 / "goals-aim" / "goal_types.json"
+            types = json.loads(gt.read_text())["types"] if gt.exists() else None
+            return v4rate_report(rdir, title="Aim-conditioned goals (arm N-aim)", arms=("N-aim",),
+                                 controls=("control:N-aim",), types=types)
         return v4rate_report(rdir)
     if a.step == "refilm":
         return v4rate_refilm(a, s1, rdir)
@@ -1054,8 +1077,8 @@ def v4rate(a) -> None:
             tr = S[arm][tid]
             if which == "end":
                 W[name] = {"rule": tr["parent_rule"], "still": tr["parent"]}
-            else:                            # the parent halfway, as on the sheet
-                mid = S[arm]["_st"]["step"] // 2
+            else:                            # the parent halfway, as on the sheet; "at<k>": the parent after step k
+                mid = int(which[2:]) if which.startswith("at") else S[arm]["_st"]["step"] // 2
                 h = next((x for x in reversed(TR[arm]) if x["trigger"] == tid and x["step"] <= mid), None)
                 W[name] = ({"rule": h["rule"], "still": h["image"]} if h else {"rule": tr["start_rule"], "still": tr["start"]})
         return name
@@ -1064,10 +1087,10 @@ def v4rate(a) -> None:
         W.setdefault(f"start:{t['id']}", {"rule": t["rule"], "still": f"img/{t['image']}"})
         return f"start:{t['id']}"
 
-    def control(t, i):                       # a random unselected step-1 child (the same children in every arm)
+    def control(t, i, arm=None):             # a random unselected step-1 child (the same children in every arm)
         name = f"ctrl:{t['id']}"
         if name not in W:
-            arm = "N" if "N" in S else next(iter(S))
+            arm = arm or ("N" if "N" in S else next(iter(S)))
             st = S[arm]["_st"]
             rows = [r for r in csv.DictReader(open(s1 / a.tag / arm / "duels.csv"))
                     if r["trigger"] == t["id"] and r["step"] == "1" and r["picked"] == "0"
@@ -1088,7 +1111,22 @@ def v4rate(a) -> None:
                       "sees": g["sees"] if g else None, "push": g["push"] if g else None})
     have = lambda *arms, tid=None: all(x in S and (tid is None or tid in S[x]) for x in arms)
     cap = {tid: S["L"][tid]["route"] for tid in S["L"] if tid != "_st"} if "L" in S else {}
-    for i, t in enumerate(T):
+    if a.session == "aim":
+        if not have("N-aim", "L", "N"):
+            sys.exit(f"the aim session needs arms N-aim, L and N in {s1 / a.tag}")
+        if S["N-aim"]["_st"]["step"] != V4_AIM_END:
+            sys.exit(f"arm N-aim has run {S['N-aim']['_st']['step']} steps, not {V4_AIM_END}")
+        for i, t in enumerate(T):
+            tid = t["id"]
+            if not have("N-aim", "L", "N", tid=tid):
+                print(f"{tid}: not in every arm (a --limit run?); skipped", file=sys.stderr)
+                continue
+            na = world("N-aim", tid, "end")
+            add("interest:Naim-vs-L", "interest", tid, na, world("L", tid, f"at{V4_AIM_END}"))
+            add("interest:Naim-vs-N", "interest", tid, na, world("N", tid, f"at{V4_AIM_END}"))
+            add("end-vs-start:N-aim", "goal", tid, na, start(t), goal("N-aim", tid))
+            add("control:N-aim", "goal", tid, control(t, i, "N-aim"), start(t), goal("N-aim", tid))
+    for i, t in enumerate(T if a.session == "v4" else []):
         tid = t["id"]
         for arm in ("N", "L"):
             if have(arm, tid=tid):
@@ -1102,7 +1140,7 @@ def v4rate(a) -> None:
         elif have("NF", "L", tid=tid):
             add("interest:NF-vs-L", "interest", tid, world("NF", tid, "end"), world("L", tid, "end"))
     ids = [t["id"] for t in T]
-    order = [ids[k] for k in rng.permutation(len(ids))]
+    order = [ids[k] for k in rng.permutation(len(ids))] if a.session == "v4" else []
     for n, tid in enumerate(order):          # controls: half with N's goal, half with L's
         arm = ("N" if n % 2 == 0 else "L") if have("N", "L") else next(iter(S))
         t = T[ids.index(tid)]
@@ -1176,7 +1214,8 @@ def _binom_greater(k: int, n: int) -> float:
     return float(sum(comb(n, j) for j in range(k, n + 1)) / 2 ** n) if n else float("nan")
 
 
-def v4rate_report(rdir: Path) -> None:
+def v4rate_report(rdir: Path, title: str = "Expedition v4", arms: tuple = ("N", "L"),
+                   controls: tuple = ("control:N", "control:L"), types: dict | None = None) -> None:
     from lenia.stats import fisher_greater
     tasks = {t["id"]: t for t in json.loads((rdir / "tasks.json").read_text())}
     R = {int(r["id"]): r["answer"] for r in csv.DictReader(open(rdir / "ratings.csv"))}
@@ -1185,7 +1224,14 @@ def v4rate_report(rdir: Path) -> None:
         t = tasks[i]
         win = None if ans == "neither" else (t["left_world"] if ans == "left" else t["right_world"]) == t["a"]
         by.setdefault(t["group"], []).append(win)
-    rows, L = {}, [f"# Expedition v4: blind ratings ({len(R)} of {len(tasks)} pairs rated)\n",
+    bytype = {}                              # (group, goal type) -> wins, for the interest groups
+    if types:
+        for i, ans in R.items():
+            t = tasks[i]
+            if t["question"] == "interest":
+                win = None if ans == "neither" else (t["left_world"] if ans == "left" else t["right_world"]) == t["a"]
+                bytype.setdefault((t["group"], types.get(t["trigger"], "?")), []).append(win)
+    rows, L = {}, [f"# {title}: blind ratings ({len(R)} of {len(tasks)} pairs rated)\n",
                    "First-named world = the one counted as a win (end, N, NF ...). Neither = can't tell.\n",
                    "| group | wins | losses | neither | win rate (decided) | one-sided p |", "|---|---|---|---|---|---|"]
     for g in sorted(by):
@@ -1195,13 +1241,18 @@ def v4rate_report(rdir: Path) -> None:
         L.append(f"| {g} | {w} | {l_} | {sum(x is None for x in v)} | {w / max(1, w + l_):.2f} | {_binom_greater(w, w + l_):.3f} |")
     L.append("\np: sign test against a coin flip, except below. Does steering beat an unsteered change "
              "(end vs start against control vs start, Fisher one-sided)?")
-    for arm in ("N", "L"):
+    for arm in arms:
         e = rows.get(f"end-vs-start:{arm}")
-        cc = tuple(map(sum, zip(*[rows[g] for g in ("control:N", "control:L") if g in rows]))) if any(
-            g in rows for g in ("control:N", "control:L")) else None
+        cc = tuple(map(sum, zip(*[rows[g] for g in controls if g in rows]))) if any(
+            g in rows for g in controls) else None
         if e and cc:
             L.append(f"- {arm}: end beats start {e[0]}/{sum(e)}, controls {cc[0]}/{sum(cc)}: "
                      f"p = {fisher_greater(e[0], e[1], cc[0], cc[1]):.3f}")
+    if bytype:
+        L += ["\nInterest by goal type (tagged before the run; first-named arm's wins):\n",
+              "| group | goal type | wins | losses | neither |", "|---|---|---|---|---|"]
+        for (g, ty), v in sorted(bytype.items()):
+            L.append(f"| {g} | {ty} | {sum(x is True for x in v)} | {sum(x is False for x in v)} | {sum(x is None for x in v)} |")
     sides = list(R.values())
     L.append(f"\nSides: {sides.count('left')} left, {sides.count('right')} right, {sides.count('neither')} neither.")
     (rdir / "report.md").write_text("\n".join(L) + "\n")
@@ -1733,6 +1784,63 @@ def sheet(a, cols: int = 4, px: int = 420) -> Path:
     return p
 
 
+# ---------- cache merge (11-04): fold one machine's cache into the canonical one ----------
+#
+# Judge, describe and caption caches are SQLite files of answers keyed by a hash of everything that shapes the answer,
+# so two copies merge by key without conflicts: rows the destination lacks are added; rows it has are kept as they are
+# (a key present in both with different contents is counted and left alone: the destination, Drive's copy, wins).
+# The destination is backed up first (<dst>.bak-<time>). Used once on 11-04 to move the Mac's Gemini caches into
+# Drive's stage1-s0 before the Gemini steps moved to Colab (colab/mace.ipynb section 5f).
+
+def mergecache(a) -> None:
+    import shutil
+    import sqlite3
+    src, dst = Path(a.src), Path(a.dst)
+    if not src.exists() or not dst.exists():
+        sys.exit(f"missing: {[str(x) for x in (src, dst) if not x.exists()]}")
+    S = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
+    D = sqlite3.connect(dst)
+    plan = []
+    for name, sql in S.execute("SELECT name, sql FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"):
+        cols = [r[1] for r in S.execute(f"PRAGMA table_info({name})")]
+        pk = [r[1] for r in S.execute(f"PRAGMA table_info({name})") if r[5]]
+        have = D.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone()
+        if have and [r[1] for r in D.execute(f"PRAGMA table_info({name})")] != cols:
+            sys.exit(f"table {name}: columns differ between {src} and {dst}; not merging")
+        rows = S.execute(f"SELECT {', '.join(cols)} FROM {name}").fetchall()
+        new, same, differ = [], 0, 0
+        for r in rows:
+            if have and pk:
+                k = [r[cols.index(c)] for c in pk]
+                d = D.execute(f"SELECT {', '.join(cols)} FROM {name} WHERE " + " AND ".join(f"{c}=?" for c in pk), k).fetchone()
+            elif have:
+                d = D.execute(f"SELECT {', '.join(cols)} FROM {name} WHERE " + " AND ".join(f"{c} IS ?" for c in cols),
+                              r).fetchone()
+            else:
+                d = None
+            if d is None:
+                new.append(r)
+            elif tuple(d) == tuple(r):
+                same += 1
+            else:
+                differ += 1
+        plan.append((name, sql, have, cols, new, same, differ))
+        print(f"{name}: {len(rows)} rows in {src.name}: {len(new)} new, {same} already there, {differ} differ (kept {dst.name}'s)")
+    if a.dry or not any(x[4] for x in plan):
+        print("nothing written" + (" (--dry)" if a.dry else ""))
+        return
+    bak = dst.with_name(f"{dst.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
+    D.close()
+    shutil.copy(dst, bak)
+    D = sqlite3.connect(dst)
+    with D:
+        for name, sql, have, cols, new, _, _ in plan:
+            if not have:
+                D.execute(sql)
+            D.executemany(f"INSERT INTO {name} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", new)
+    print(f"merged into {dst} (backup: {bak.name})")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1828,6 +1936,7 @@ def main() -> None:
     n.add_argument("--aim", default=AIM_ALIFE, help="the user's open-ended aim")
     n.add_argument("--vlm", default="gemini-pro", help="the namer (gemini-pro-or: the same model via OpenRouter; fake: dry run)")
     n.add_argument("--dest", default=None, help="output folder (default <out>/goals-aim)")
+    n.add_argument("--force", action="store_true", help="ask the namer again even if <dest>/N-aim.json holds this namer's goals")
     n.add_argument("--prev", default=None, help="an earlier N-aim.json to show as an extra column (e.g. goals-aim-v1)")
     n.add_argument("--config", default=None)
     n.add_argument("--seed", type=int, default=0)
@@ -1861,8 +1970,14 @@ def main() -> None:
     v.add_argument("--max-vlm-usd", type=float, default=0.0)
     for k in ("size", "warmup", "render", "gap", "sim_batch"):
         v.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
+    mc = sub.add_parser("mergecache", help="add a cache's missing answers to another (SQLite, by key; backs up the destination)")
+    mc.add_argument("--src", required=True, help="the cache to take answers from (read only)")
+    mc.add_argument("--dst", required=True, help="the canonical cache (e.g. Drive's); backed up before writing")
+    mc.add_argument("--dry", action="store_true", help="count only")
     r4 = sub.add_parser("v4rate", help="v4's blind session: build (Colab: films), rate (Mac page), report")
     r4.add_argument("step", choices=["build", "refilm", "rate", "report"])
+    r4.add_argument("--session", default="v4", choices=sorted(RATE_DIRS), help="v4 (rate-v4) or aim (rate-aim: N-aim vs "
+                    "L and N at step 10, N-aim end vs start with controls)")
     r4.add_argument("--out", required=True, help="this seed's Stage 1 folder (the session goes to <out>/rate-v4)")
     r4.add_argument("--run", default=None, help="the base run (build and refilm)")
     r4.add_argument("--tag", default=V4_DIR)
@@ -1876,7 +1991,7 @@ def main() -> None:
     for k in ("size", "warmup", "render", "gap", "sim_batch"):
         r4.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
     a = ap.parse_args()
-    {"aimgoals": aimgoals, "v4rate": v4rate, "v4": expedition_v4, "capcheck": capcheck, "captions": captions, "triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check, "goalcheck": goalcheck,
+    {"mergecache": mergecache, "aimgoals": aimgoals, "v4rate": v4rate, "v4": expedition_v4, "capcheck": capcheck, "captions": captions, "triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check, "goalcheck": goalcheck,
      "heritability": heritability}[a.cmd](a)
 
 
