@@ -143,6 +143,71 @@ GEN.setdefault(NAMER, {
              "feature is one of these, describe a different one):\n{names}"),
     "fields": ["sees", "push"]})
 
+# Aim-conditioned namer (Stage 1, 11-04; project doc "Handoff - Stage 1 aim-conditioned goals"). The user's open-ended
+# aim becomes an input: the push is the change to the "sees" feature that would most move the world toward the aim.
+# What changed from namer_v1 and why (v4 ratings, 11-03: N's goals on the floor triggers lost 0-6 on interest to the
+# library's, and all asked for "more of it": spawn, bud, split, a larger colony):
+# - v1's push had to "develop that feature further", which reads as "more of it"; it now serves the aim.
+# - v1's "It must be visible in snapshots like these" read as "static"; it is now stated as a fact about the system
+#   (the judge compares four snapshots, which show shapes and how they change over time), not as a rule.
+# - No list of banned goal types (Felix 11-03: a change of approach, not patches). Kept from v1: the contrast with
+#   typical worlds, the concrete "sees", the "make ..." push and its length (the attain prompt and the captions read
+#   it), and the run's earlier names (so triggers get different features).
+AIM_ALIFE = "more interesting as artificial life: richer structure or behaviour, more like something alive"
+NAMER_AIM_V1 = "namer_aim_v1"
+GEN.setdefault(NAMER_AIM_V1, {
+    "system": _GEN_SYSTEM + " The cheap judge has flagged one world as surprising compared with what the run usually "
+              "produces. Your description will be used by the cheap judge to pick this world out from others, and to "
+              "steer its descendants toward the aim of the experiment.",
+    "user": ("The aim of this experiment, in the user's words: \"{aim}\"\n\n"
+             "Image 1 is the flagged world. Images 2-5 are typical worlds from the same run, for contrast. " + _FRAMES +
+             "\n\nReturn {\"sees\": ..., \"push\": ...}:\n"
+             "- sees: what Image 1 shows that the typical worlds do not: one concrete, visible feature or behaviour that "
+             "sets it apart, described so that someone could point to it in the picture (one sentence, at most 25 words). "
+             "Not just a different colour, size or amount of the same thing.\n"
+             "- push: the change to that feature that would most move this world toward the aim, as an instruction "
+             "starting with \"make\" (one sentence, at most 20 words).\n\n"
+             "The cheap judge will compare descendants with Image 1 using four snapshots like these, which show both the "
+             "shapes in each snapshot and how they move or change from one snapshot to the next; it can follow a change "
+             "only if that change shows in them.\n\n"
+             "Descriptions already given to other worlds in this run (do not reuse them; if Image 1's most distinctive "
+             "feature is one of these, describe a different one):\n{names}"),
+    "fields": ["sees", "push"]})
+
+# v2 (11-04, after v1's 12 goals): 9 of 12 pushes asked for buds, eggs or split-off pieces to grow into new organisms,
+# swim away or form a colony. In MaCE-Lenia that cannot happen: mass is conserved, so a piece takes its mass from the
+# body and stays small unless pieces merge again (Felix 11-04). The model was never told this. v2 adds the substrate's
+# mass budget as a fact (_MASS, to be shared with the aim-aware review); nothing else changes, and no goal type is banned.
+_MASS = ("How these worlds work: each chemical channel's total mass is fixed. A world never gains or loses mass; it only "
+         "moves it around, and every world starts with the same amount. So when a body splits or something buds off, the "
+         "pieces share the mass the body had. A piece cannot grow by itself: it grows only by merging with other pieces "
+         "or drawing mass from them, and pieces that drift apart stay small.")
+NAMER_AIM_V2 = "namer_aim_v2"
+_u = GEN[NAMER_AIM_V1]["user"]
+_cut = "\n\nReturn {"
+assert _cut in _u
+GEN.setdefault(NAMER_AIM_V2, {"system": GEN[NAMER_AIM_V1]["system"], "user": _u.replace(_cut, "\n\n" + _MASS + _cut, 1),
+                              "fields": ["sees", "push"]})
+
+# v3 (11-04, after v2): the "grow into new organisms" pushes were gone, but 8 of 12 goals still asked for division or
+# detaching. Their "sees" was a division event: the triggers are surprise-flagged, and in these worlds a splitting
+# event is often what stands out, so "sees = what is most distinctive" + "push develops sees" yields division. Where
+# "sees" was a body (L55, L19, L46, L22), v2's goals were good. v3 separates what is distinctive from what to develop,
+# as a Picbreeder user does: list 2-3 distinctive features, then build on the one with the most potential toward the
+# aim. Everything else is v2's text.
+NAMER_AIM = "namer_aim_v3"
+_old_spec = GEN[NAMER_AIM_V2]["user"][GEN[NAMER_AIM_V2]["user"].index("Return {"):GEN[NAMER_AIM_V2]["user"].index("- push:")]
+_new_spec = ("Return {\"features\": [...], \"sees\": ..., \"push\": ...}:\n"
+             "- features: two or three things Image 1 shows that the typical worlds do not, each one concrete, visible "
+             "feature or behaviour, described so that someone could point to it in the picture (at most 25 words each). "
+             "Not just a different colour, size or amount of the same thing.\n"
+             "- sees: the one of those features with the most potential toward the aim, given how these worlds work: "
+             "the starting point the descendants will build on (copy or shorten it; one sentence, at most 25 words).\n")
+assert _old_spec.startswith("Return {") and "- sees:" in _old_spec
+GEN.setdefault(NAMER_AIM, {"system": GEN[NAMER_AIM_V2]["system"],
+                           "user": GEN[NAMER_AIM_V2]["user"].replace(_old_spec, _new_spec, 1),
+                           "fields": ["sees", "push"]})      # "features" (a list) passes through describe.parse as an extra key
+
 # Arm N+R: one scheduled review of an expedition (continue / refine only in Stage 1).
 REVIEW = "review_v1"
 GEN.setdefault(REVIEW, {

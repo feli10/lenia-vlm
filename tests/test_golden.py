@@ -32,7 +32,7 @@ from lenia import mace as M                                   # noqa: E402
 from lenia.mace import mutate, texture                        # noqa: E402
 from lenia.prompts import (INTEREST, NONE, SESSION_MATCH, STEER, SURPRISE,  # noqa: E402
                            attain_prompt, steer_prompt, verify_prompt, GEN, NAMER, REVIEW, REVIEW_R, REVIEW_S, GOAL_JUDGE,
-                           CAPTION)
+                           CAPTION, NAMER_AIM, NAMER_AIM_V1, NAMER_AIM_V2)
 
 GOAL = {"id": "golden", "sees": "a round body with a dark core", "push": "make the core split in two"}
 
@@ -55,6 +55,9 @@ def compute() -> dict:
     out["gen/review_switch"] = _h(GEN[REVIEW_S])
     out["gen/goal_judge"] = _h(GEN[GOAL_JUDGE])
     out["gen/caption"] = _h(GEN[CAPTION])
+    out["gen/namer_aim"] = _h(GEN[NAMER_AIM_V1])
+    out["gen/namer_aim_v2"] = _h(GEN[NAMER_AIM_V2])
+    out["gen/namer_aim_v3"] = _h(GEN[NAMER_AIM])
     out["menu/session_match"] = _h(SESSION_MATCH)                 # multiple-choice texts key the cache too
     out["menu/steer_groups"] = _h(STEER)
     out["menu/none"] = NONE
@@ -129,7 +132,10 @@ EXPECTED = {
     "gen/review_refine": "9e8f6554186c3c49",                       # added 2026-10-29 (N+R / N+S split after gate 0b)
     "gen/review_switch": "1c5d1362a9865626",
     "gen/goal_judge": "51c9fae75dfb3f8d",                          # added 2026-10-29 (goal check after arm L)
-    "gen/caption": "f45934b78e738e80"                              # added 2026-11-02 (goal captions, Stage 1 v4)
+    "gen/caption": "f45934b78e738e80",                             # added 2026-11-02 (goal captions, Stage 1 v4)
+    "gen/namer_aim": "5b9b6e0dca5eca58",                           # added 2026-11-04 (aim-conditioned namer)
+    "gen/namer_aim_v2": "ebe4bf216e41b23c",                        # added 2026-11-04 (v2: the mass budget as a fact)
+    "gen/namer_aim_v3": "33688547f4657c6a"                                     # added 2026-11-04 (v3: choose among distinctive features)
 }   # recorded 2026-10-28 (cleanup); prompts, founders, mutate, simulate unchanged from before it; menus and interest added before the prompt move
 
 

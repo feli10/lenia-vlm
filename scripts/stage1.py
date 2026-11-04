@@ -12,6 +12,14 @@ Goal captions for the v4 CLIP shortlist (--arm N or L; hand captions for L's see
   PYTHONPATH=src:scripts python3 scripts/stage1.py captions --run runs/mace-qd5-sarch-s0 --out runs/stage1-s0 \\
       --caption-vlm fake --dest /tmp/cap-dry
 
+Aim-conditioned goals (11-04; Gemini on Felix's Mac, about $0.15), then their captions (about $0.04):
+
+  PYTHONPATH=src:scripts python3 scripts/stage1.py aimgoals --run runs/mace-qd5-sarch-s0 --out runs/stage1-s0 \\
+      --prev runs/stage1-s0/goals-aim-v2/N-aim.json
+  PYTHONPATH=src:scripts python3 scripts/stage1.py captions --arm N-aim --run runs/mace-qd5-sarch-s0 --out runs/stage1-s0
+  Dry run: --vlm fake with --out a scratch folder holding copies of triggers.json, img/ and captions/ (so no fake
+  answers land in the seed's describe cache).
+
 Caption check (v4 step 2; Colab, GPU, no API calls; regrows expedition v3's arm L children):
 
   python scripts/stage1.py capcheck --run RUNS/mace-qd5-sarch-s0 --out RUNS/stage1-s0 --backend auto --evals /content/capcheck-evals
@@ -23,7 +31,8 @@ Expedition v4 (Colab: GPU and Jev; see colab/mace.ipynb section 5c). Smoke test 
   python scripts/stage1.py v4 --arm N --run RUNS/mace-qd5-sarch-s0 --out RUNS/stage1-s0 --backend auto --evals /content/evals \\
       --tag exp-v4-smoke --limit 2 --stop-after 3
   python scripts/stage1.py v4 --arm L --run RUNS/mace-qd5-sarch-s0 --out RUNS/stage1-s0 --backend auto --evals /content/evals
-  ... then --arm N, NF, C. Results in <out>/exp-v4/<arm>/: state.json, duels.csv (every child), trace.jsonl (picks),
+  ... then --arm N, NF, C; 11-04: --arm N-aim (after `aimgoals` and `captions --arm N-aim`; ends at step 10).
+  Results in <out>/exp-v4/<arm>/: state.json, duels.csv (every child), trace.jsonl (picks),
   sheet.png (start | halfway | end), summary.md.
 
 Step 5 on, the expeditions (Colab: GPU and judge calls; see colab/mace.ipynb):
@@ -71,7 +80,7 @@ from lenia import backend
 from lenia.config import REPO_ROOT, load
 from lenia.judge import BudgetError, ChoiceQuery, Judge, MultiQuery, Query, load_env
 from lenia.mace import TILE as ME_TILE, mutate
-from lenia.prompts import (CAPTION, COMPLEXITY, NAMER, NONE, REVIEW_R, REVIEW_S, SESSION_MATCH, STEER, SURPRISE, attain_prompt,
+from lenia.prompts import (AIM_ALIFE, CAPTION, COMPLEXITY, NAMER, NAMER_AIM, NONE, REVIEW_R, REVIEW_S, SESSION_MATCH, STEER, SURPRISE, attain_prompt,
                            steer_prompt)
 from lenia.sim import Rule
 
@@ -379,20 +388,118 @@ def library_goals(a, judge, starts: list) -> list:
     return goals
 
 
-def namer_goals(a, s1: Path, run: Path, T: list, starts: list, cache_only: bool = False) -> list:
-    """Arm N's goals: the VLM (--vlm) names each trigger against 4 typical worlds of the run."""
+def namer_goals(a, s1: Path, run: Path, T: list, starts: list, cache_only: bool = False, prompt: str = NAMER,
+                aim: str | None = None) -> list:
+    """Arm N's goals: the VLM (--vlm) names each trigger against 4 typical worlds of the run. With prompt=NAMER_AIM
+    and an aim, the push serves the experiment's aim (arm N-aim); the default is namer_v1, unchanged."""
     from lenia.describe import Ask
+    if (prompt == NAMER_AIM) != (aim is not None):
+        raise ValueError("an aim goes with NAMER_AIM, and only with it")
     d = _describer(a, s1, cache_only)
     goals, given = [], []
     for t, w in zip(T, starts):                  # sequential: each call sees the names given so far (as the bake-off)
         fill = {"names": "\n".join(f"- {x}" for x in given) if given else "(none yet)"}
-        [r] = d.ask_many([Ask(NAMER, [w] + [_pic(run, f"img/{n}") for n in typical(run, t)], fill)], desc=t["id"])
+        if aim is not None:
+            fill["aim"] = aim
+        [r] = d.ask_many([Ask(prompt, [w] + [_pic(run, f"img/{n}") for n in typical(run, t)], fill)], desc=t["id"])
         if not r.ok:
             sys.exit(f"naming failed at {t['id']}: {r.raw[:300]} (re-run to retry)")
         given.append(r.data["sees"])
-        goals.append({"id": goal_id(r.data["sees"], r.data["push"]), "sees": r.data["sees"], "push": r.data["push"],
-                      "source": f"namer:{d.model}", "cost": r.cost})
+        g = {"id": goal_id(r.data["sees"], r.data["push"]), "sees": r.data["sees"], "push": r.data["push"],
+             "source": f"namer:{d.model}", "cost": r.cost}
+        if aim is not None:                      # v1's goal dicts stay exactly as before
+            g.update(prompt=prompt, aim=aim)
+            if isinstance(r.data.get("features"), list):        # namer_aim_v3: the candidates "sees" was chosen from
+                g["features"] = [str(x) for x in r.data["features"]]
+        goals.append(g)
     return goals
+
+
+# ---------- aim-conditioned goals (11-04; project doc "Handoff - Stage 1 aim-conditioned goals") ----------
+#
+# The user's open-ended aim (--aim; default AIM_ALIFE, the wording of the rating's interest question, so Felix's
+# rating is the user's prompt) goes into the namer (NAMER_AIM): "sees" stays the trigger's distinctive feature and the
+# push develops that feature toward the aim. `aimgoals` names the 12 triggers (about $0.15 of Gemini, Felix's Mac) and
+# puts each beside the goals v1 and the library gave it (from captions/N.json and L.json: no calls), as a table and a
+# sheet, so the goals can be read before any Jev spend. Captions for the new goals: `captions --arm N-aim` (~$0.04).
+# NAMER_AIM is v3 (11-04): v2 stated the mass budget as a fact; v3 lists 2-3 distinctive features and builds on the
+# most promising. Earlier answers: <out>/goals-aim-v1, goals-aim-v2 (--prev shows one beside the new goals).
+# Ours: the aim as an input to goal writing. From papers: open-ended text goals for search (ASAL; OMNI's "interesting"
+# as a model's judgement, Zhang et al. 2023).
+
+def _wrap(text: str, width: int) -> list:
+    import textwrap
+    return textwrap.wrap(text, width) or [""]
+
+
+def _goal_flags(g: dict) -> list:
+    f = [] if g["push"].strip().lower().startswith("make") else ["push not 'make ...'"]
+    f += [] if len(g["push"].split()) <= 20 else [f"push {len(g['push'].split())} words"]
+    f += [] if len(g["sees"].split()) <= 25 else [f"sees {len(g['sees'].split())} words"]
+    return f
+
+
+def aimgoals(a) -> None:
+    s1, run = Path(a.out), Path(a.run)
+    dest = Path(a.dest) if a.dest else s1 / "goals-aim"
+    dest.mkdir(parents=True, exist_ok=True)
+    T = json.loads((s1 / "triggers.json").read_text())["triggers"][:a.limit or None]
+    starts = [_pic(s1, f"img/{t['image']}") for t in T]
+    goals = namer_goals(a, s1, run, T, starts, prompt=NAMER_AIM, aim=a.aim)
+    old = {}
+    for arm in ("L", "N"):                   # the goals each trigger had before, from the captions files (no calls)
+        f = s1 / "captions" / f"{arm}.json"
+        old[arm] = {r["trigger"]: r for r in json.loads(f.read_text())} if f.exists() else {}
+    prev = {r["trigger"]: r for r in json.loads(Path(a.prev).read_text())} if a.prev else None
+    rows = [{"trigger": t["id"], **g, "cost": round(g["cost"], 6), "flags": _goal_flags(g)} for t, g in zip(T, goals)]
+    (dest / "N-aim.json").write_text(json.dumps(rows, indent=1))
+    cell = lambda r: "-" if r is None else (f"{r['push']}<br><sub>sees: {r['sees']}</sub>" +
+                                            "".join(f"<br><sub>· {x}</sub>" for x in r.get("features", [])))
+    L = [f"# Aim-conditioned goals, seed {a.seed} ({a.vlm}, {NAMER_AIM})\n",
+         f"Aim: \"{a.aim}\"\n", f"Spend ${sum(r['cost'] for r in rows):.4f} (cached answers count as spent once).\n",
+         f"| trigger | N-aim (new) |{' previous |' if prev else ''} N (namer_v1) | L (library) | flags |",
+         "|---|---|" + ("---|" if prev else "") + "---|---|---|"]
+    L += [f"| {r['trigger']} | {cell(r)} |" + (f" {cell(prev.get(r['trigger']))} |" if prev else "") +
+          f" {cell(old['N'].get(r['trigger']))} | {cell(old['L'].get(r['trigger']))} | {', '.join(r['flags'])} |" for r in rows]
+    (dest / "compare.md").write_text("\n".join(L) + "\n")
+    # the sheet: the start picture, then the three goals side by side
+    px, colw, chars, line = 300, 380, 50, 17
+    f1, f2, f3 = _font(17), _font(14), _font(13)
+    blocks = []
+    for r, t in zip(rows, T):
+        cols = []
+        named = [("N-aim", r)] + ([("previous", prev.get(r["trigger"]))] if prev else [])
+        for name, g in named + [("N v1", old["N"].get(r["trigger"])), ("L", old["L"].get(r["trigger"]))]:
+            if g is None:
+                cols.append((name, [], []))
+            else:
+                extra = [ln for x in g.get("features", []) for ln in _wrap("· " + x, chars + 4)]
+                cols.append((name, _wrap(g["push"], chars), _wrap("sees: " + g["sees"], chars + 4) + extra))
+        h = max(px, 26 + max(line * (len(p) + len(q)) + 30 for _, p, q in cols))
+        blocks.append((t, cols, h))
+    W = 8 + px + 12 + len(blocks[0][1]) * (colw + 10)
+    im = Image.new("RGB", (W, 8 + sum(h + 14 for *_, h in blocks)), (250, 250, 250))
+    d = ImageDraw.Draw(im)
+    y = 8
+    for t, cols, h in blocks:
+        im.paste(Image.open(s1 / "img" / t["image"]).convert("RGB").resize((px, px), Image.BILINEAR), (8, y))
+        for j, (name, push, sees) in enumerate(cols):
+            x = 8 + px + 12 + j * (colw + 10)
+            d.text((x, y), f"{t['id']}  {name}", fill=(20, 20, 20) if j == 0 else (90, 90, 90), font=f1)
+            yy = y + 26
+            for ln in push:
+                d.text((x, yy), ln, fill="black", font=f2)
+                yy += line
+            yy += 8
+            for ln in sees:
+                d.text((x, yy), ln, fill=(110, 110, 110), font=f3)
+                yy += line
+        y += h + 6
+        d.line((8, y, W - 8, y), fill=(210, 210, 210))
+        y += 8
+    im.save(dest / "compare.png")
+    print("\n".join(L))
+    print(f"wrote {dest / 'N-aim.json'}, compare.md, compare.png", file=sys.stderr)
 
 
 # ---------- goal captions (v4 step 1, 11-02; project doc "Stage 1 direction - goal steering") ----------
@@ -437,6 +544,8 @@ def captions(a) -> None:
     load_env(REPO_ROOT / ".env")
     if a.arm == "N":
         goals = namer_goals(a, s1, run, T, starts, cache_only=True)
+    elif a.arm == "N-aim":                   # the aim namer's cached answers (`aimgoals` first)
+        goals = namer_goals(a, s1, run, T, starts, cache_only=True, prompt=NAMER_AIM, aim=a.aim)
     else:                                    # cap 1e-9: any uncached matching call raises BudgetError, nothing is called
         judge = Judge(a.judge, {**cfg["judges"]["defaults"], **cfg["judges"][a.judge], "max_run_usd": 1e-9},
                       s1 / "judge_cache.sqlite", yes=True)
@@ -626,7 +735,13 @@ def capcheck(a) -> None:
 # Ours: the trigger expedition, the routes, arms NF and C. From papers: comma selection ((1,lambda)-ES; Rechenberg,
 # Schwefel), CLIP text targets for search (ASAL), foundation-model goals steering evolution (ASAL; the Picbreeder line).
 
-V4_DIR, V4_ARMS = "exp-v4", ("L", "N", "NF", "C")
+V4_DIR, V4_ARMS = "exp-v4", ("L", "N", "NF", "C", "N-aim")
+# N-aim (11-04): aim-conditioned goals (NAMER_AIM, --aim; read from goals-aim/N-aim.json) and their captions
+# (captions/N-aim.json), routes from the
+# captions as in N. It keeps the 20-step mutation schedule and ends at step V4_AIM_END, so its 10 steps draw exactly
+# the mutations L's and N's first 10 did (same seeds; same step-1 children): against their stored step-10 worlds only
+# the goal differs. (v4's ratings: steps 11-20 added nothing, 4-3 with 5 can't-tell.)
+V4_AIM_END = 10
 V4_STEPS, V4_CHILDREN, V4_JUDGED = 20, 48, 16
 V4_SCHED, V4_MOTION = (2.0, 0.8), 1.0
 
@@ -639,8 +754,21 @@ def v4_scale(step: int, steps: int) -> float:
 def v4_setup(a, s1: Path, run: Path, judge) -> dict:
     T = json.loads((s1 / "triggers.json").read_text())["triggers"]
     starts = [_pic(s1, f"img/{t['image']}") for t in T]
-    src = "L" if a.arm == "L" else "N"
-    goals = library_goals(a, judge, starts) if src == "L" else namer_goals(a, s1, run, T, starts, cache_only=True)
+    src = a.arm if a.arm in ("L", "N-aim") else "N"
+    if src == "L":
+        goals = library_goals(a, judge, starts)
+    elif src == "N-aim":                     # aimgoals' output (Colab has no copy of the Mac's describe cache)
+        gf = s1 / "goals-aim" / "N-aim.json"
+        if not gf.exists():
+            sys.exit(f"{gf} is missing: run `stage1.py aimgoals` on the Mac and copy goals-aim/ up to this folder")
+        byt = {r["trigger"]: r for r in json.loads(gf.read_text())}
+        bad = [t["id"] for t in T if t["id"] not in byt or byt[t["id"]].get("prompt") != NAMER_AIM
+               or byt[t["id"]].get("aim") != a.aim]
+        if bad:
+            sys.exit(f"{gf}: no {NAMER_AIM} goal for the aim {a.aim!r} at {', '.join(bad)}")
+        goals = [{k: v for k, v in byt[t["id"]].items() if k not in ("trigger", "flags")} for t in T]
+    else:
+        goals = namer_goals(a, s1, run, T, starts, cache_only=True)
     capf = s1 / "captions" / f"{src}.json"
     if not capf.exists():
         sys.exit(f"{capf} is missing: run `stage1.py captions --arm {src}` first")
@@ -662,7 +790,10 @@ def v4_setup(a, s1: Path, run: Path, judge) -> dict:
                     "start_motion": t.get("motion"), "goal": g, "caption": {"end": c["end"], "start": c["start"]},
                     "route": route, "target": target, "parent_rule": t["rule"], "parent": f"img/{t['image']}",
                     "g": 0.5, "k": 0.5, "s": 0.5, "history": [], "stats": []})
-    return {"arm": a.arm, "version": V4_DIR, "step": 0, "seed": a.seed, "steps": a.steps, "children": V4_CHILDREN,
+    end = a.end or (V4_AIM_END if a.arm == "N-aim" else a.steps)
+    extra = {"aim": a.aim, "namer": NAMER_AIM} if a.arm == "N-aim" else {}
+    return {"arm": a.arm, "version": V4_DIR, "step": 0, "seed": a.seed, "steps": a.steps, "end": end, **extra,
+            "children": V4_CHILDREN,
             "judged": V4_JUDGED, "sched": list(V4_SCHED), "motion_floor": a.motion_floor, "k_floor": K_FLOOR, "triggers": trs}
 
 
@@ -690,7 +821,8 @@ def expedition_v4(a) -> None:
     clip = ClipScorer(a.clip)
     tile = lambda pic: np.asarray(pic)[-ME_TILE:, -ME_TILE:]
     starts = {tr["index"]: _pic(s1, tr["start"]) for tr in st["triggers"]}
-    stop = min(st["steps"], a.stop_after or st["steps"])
+    end = st.get("end", st["steps"])         # arms run before 11-04 have no "end": they ran the whole schedule
+    stop = min(end, a.stop_after or end)
     while st["step"] < stop:
         step, t0 = st["step"] + 1, time.time()
         scale = v4_scale(step, st["steps"])
@@ -783,10 +915,10 @@ def expedition_v4(a) -> None:
     for tr in st["triggers"]:
         tr.pop("_trace", None)
     QD.save_state(adir, st)
-    if st["step"] >= stop:
+    if st["step"] >= end:
         v4_sheet(s1, st, adir / "sheet.png")
         v4_summary(st, adir / "summary.md")
-        print(f"arm {a.arm}: {st['step']} of {st['steps']} steps; {adir / 'sheet.png'}, {adir / 'summary.md'}", file=sys.stderr)
+        print(f"arm {a.arm}: {st['step']} of {end} steps; {adir / 'sheet.png'}, {adir / 'summary.md'}", file=sys.stderr)
 
 
 def v4_sheet(s1: Path, st: dict, path: Path, px: int = 260) -> None:
@@ -809,7 +941,9 @@ def v4_sheet(s1: Path, st: dict, path: Path, px: int = 260) -> None:
 
 
 def v4_summary(st: dict, path: Path) -> None:
-    L = [f"# Expedition v4, arm {st['arm']}, seed {st['seed']}: {st['step']} of {st['steps']} steps\n",
+    sched = "" if st.get("end", st["steps"]) == st["steps"] else f" (mutation schedule of {st['steps']} steps)"
+    L = [f"# Expedition v4, arm {st['arm']}, seed {st['seed']}: {st['step']} of {st.get('end', st['steps'])} steps{sched}\n",
+         *([f"Aim: \"{st['aim']}\" (goals: {st['namer']})\n"] if st.get("aim") else []),
          "Jev's goal and complexity scores are the end parent against the start (0.5 = no change). CLIP mean = all "
          "valid children's mean CLIP score against the target (unselected); Jev mean = the judged shortlist's (biased "
          "upward under the clip route).\n",
@@ -1662,7 +1796,8 @@ def main() -> None:
     c.add_argument("--luna", default="luna", help="the held-out judge (fake for dry runs)")
     c.add_argument("--dir", default=None, help=f"the expedition folder (default {EXP_DIR}; arms = v1)")
     k = sub.add_parser("captions", help="goal captions for the v4 CLIP shortlist (step 1)")
-    k.add_argument("--arm", default="N", choices=("L", "N"))
+    k.add_argument("--arm", default="N", choices=("L", "N", "N-aim"))
+    k.add_argument("--aim", default=AIM_ALIFE, help="arm N-aim: the aim its goals were written for (as in aimgoals)")
     k.add_argument("--run", required=True, help="the base run (the namer's typical worlds)")
     k.add_argument("--out", required=True, help="this seed's Stage 1 folder (triggers, the namer's cache)")
     k.add_argument("--dest", default=None, help="where N.json, N.md and the caption cache go (default <out>/captions)")
@@ -1673,7 +1808,8 @@ def main() -> None:
     k.add_argument("--library", default="data/goal_library_v3.json")
     k.add_argument("--caption-vlm", default="gemini-pro", help="writes the captions (gemini-pro-or: the same model via OpenRouter; fake for a dry run)")
     k.add_argument("--limit", type=int, default=0, help="only the first k triggers")
-    k.add_argument("--max-vlm-usd", type=float, default=0.25, help="hard cap on the caption cache's total spend")
+    k.add_argument("--max-vlm-usd", type=float, default=0.5, help="hard cap on the caption cache's total spend ($0.08 "
+                   "after L and N, 11-04; the pre-call check uses the config's per-call estimate, about 4x a caption call)")
     q = sub.add_parser("capcheck", help="v4 step 2: target vs change CLIP scoring against Jev's picks (Colab; no API calls)")
     q.add_argument("--run", required=True, help="the base run (simulation settings)")
     q.add_argument("--out", required=True, help="this seed's Stage 1 folder (exp-v3/L, captions/L.json)")
@@ -1686,7 +1822,19 @@ def main() -> None:
     q.add_argument("--dry", action="store_true", help="score even if mutation does not reproduce (offline dry runs)")
     for k in ("size", "warmup", "render", "gap", "sim_batch"):
         q.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
-    v = sub.add_parser("v4", help="expedition v4: 48 children, CLIP or floor shortlist of 16, Jev picks (arms L, N, NF, C)")
+    n = sub.add_parser("aimgoals", help="aim-conditioned goals for the triggers (Gemini), beside v1's and the library's")
+    n.add_argument("--run", required=True, help="the base run (the namer's typical worlds)")
+    n.add_argument("--out", required=True, help="this seed's Stage 1 folder (triggers, describe cache, captions/)")
+    n.add_argument("--aim", default=AIM_ALIFE, help="the user's open-ended aim")
+    n.add_argument("--vlm", default="gemini-pro", help="the namer (gemini-pro-or: the same model via OpenRouter; fake: dry run)")
+    n.add_argument("--dest", default=None, help="output folder (default <out>/goals-aim)")
+    n.add_argument("--prev", default=None, help="an earlier N-aim.json to show as an extra column (e.g. goals-aim-v1)")
+    n.add_argument("--config", default=None)
+    n.add_argument("--seed", type=int, default=0)
+    n.add_argument("--limit", type=int, default=0, help="only the first k triggers")
+    n.add_argument("--max-vlm-usd", type=float, default=1.5, help="hard cap on the --out describe cache's TOTAL spend "
+                   "(every prompt and model in it: $0.75 after the aim namer's v1 and v2, 11-04)")
+    v = sub.add_parser("v4", help="expedition v4: 48 children, CLIP or floor shortlist of 16, Jev picks (arms L, N, NF, C, N-aim)")
     v.add_argument("--arm", required=True, choices=V4_ARMS)
     v.add_argument("--run", required=True, help="the base run")
     v.add_argument("--out", required=True, help="this seed's Stage 1 folder")
@@ -1702,11 +1850,14 @@ def main() -> None:
     v.add_argument("--motion-floor", type=float, default=V4_MOTION, help="motion floor for the shortlist (fixed at setup; "
                    "the bench's 1.0, uncalibrated; 0 for offline dry runs, whose tiny worlds barely move)")
     v.add_argument("--stop-after", type=int, default=0, help="stop after k steps (smoke tests; resumable)")
+    v.add_argument("--end", type=int, default=0, help=f"the arm's last step (fixed at setup; default: --steps, or "
+                   f"{V4_AIM_END} for N-aim, which keeps the {V4_STEPS}-step mutation schedule)")
+    v.add_argument("--aim", default=AIM_ALIFE, help="arm N-aim: the aim its goals were written for (as in aimgoals)")
     v.add_argument("--limit", type=int, default=0, help="only the first k of the arm's triggers")
     v.add_argument("--evals", default=None, help="simulation cache folder (on Colab: /content/evals; picks are copied "
                    "to <out>/evals)")
-    v.add_argument("--max-usd", type=float, default=6.5, help="hard cap on the --out Jev cache's TOTAL spend (all arms, "
-                   "earlier expeditions included: $3.70 on 11-03)")
+    v.add_argument("--max-usd", type=float, default=7.5, help="hard cap on the --out Jev cache's TOTAL spend (all arms, "
+                   "earlier expeditions included: $3.70 before v4, about $5.85 after it; N-aim adds about $0.45)")
     v.add_argument("--max-vlm-usd", type=float, default=0.0)
     for k in ("size", "warmup", "render", "gap", "sim_batch"):
         v.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
@@ -1725,7 +1876,7 @@ def main() -> None:
     for k in ("size", "warmup", "render", "gap", "sim_batch"):
         r4.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
     a = ap.parse_args()
-    {"v4rate": v4rate, "v4": expedition_v4, "capcheck": capcheck, "captions": captions, "triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check, "goalcheck": goalcheck,
+    {"aimgoals": aimgoals, "v4rate": v4rate, "v4": expedition_v4, "capcheck": capcheck, "captions": captions, "triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check, "goalcheck": goalcheck,
      "heritability": heritability}[a.cmd](a)
 
 
