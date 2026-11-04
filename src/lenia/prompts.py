@@ -261,6 +261,43 @@ GEN.setdefault(REVIEW_S, {
     "fields": ["decision", "sees", "push", "why"]})
 
 
+# Aim-aware review for expedition v4 (arm NS-aim, 11-04; handoff "Stage 1 aim-conditioned goals"): one review at
+# step 5 of 10. Differs from review_switch_v1 in what it sees and what it judges by: the user's aim; the mass budget
+# (_MASS); v4's step (children, shortlist, comma selection); the per-generation goal scores; and three other recent
+# descendants (the most surprising unchosen judged children of the last three generations, by Jev's surprise score),
+# so "switch" can move to a new stepping stone from the population instead of only re-reading the current parent.
+# Kept from review_switch_v1: continue / refine / switch, one review per expedition, and switching stated as costly
+# (Felix 10-29: commit to a goal for a while). The judge fact is the aim namer's.
+REVIEW_AIM = "review_aim_v1"
+GEN.setdefault(REVIEW_AIM, {
+    "system": _GEN_SYSTEM + " Here you review an expedition: the descendants of one world, steered toward a goal by "
+              "the cheap judge in service of the experiment's aim.",
+    "user": ("The aim of this experiment, in the user's words: \"{aim}\"\n\n"
+             "We steer the descendants of a world toward a goal, one generation at a time. Each generation, {children} "
+             "mutants of the current parent are made, {judged} of them are judged against the expedition's reference "
+             "world, and the one that best shows the goal becomes the next parent. " + _FRAMES + "\n\n" + _MASS + "\n\n"
+             "Image 1 is the world the expedition started from. Image 2 is the current parent, after {gens} of {total} "
+             "generations. Images 3, 4 and 5 are other recent descendants, not chosen, that the cheap judge found the "
+             "most surprising.\nThe world it started from showed this: {sees}\nThe goal: {push}\n"
+             "The cheap judge's goal score for each generation's parent against the start (0.5 = no visible change, "
+             "1 = clearly further): {progress}\n\n"
+             "Decide how to spend the remaining {left} generations (there is no later review). Judge by the aim, not "
+             "only by the goal's score:\n"
+             "- \"continue\": keep the goal.\n"
+             "- \"refine\": keep building on the current parent's feature, with a new goal for it.\n"
+             "- \"switch\": build on Image 3, 4 or 5 instead: that world becomes the parent, with its own feature and "
+             "goal. Switching drops the progress made on the current goal and leaves only the remaining generations for "
+             "the new one, so switch only if that world is clearly the more promising start toward the aim.\n\n"
+             "The cheap judge compares descendants with the reference world using four snapshots like these, which show "
+             "both the shapes in each snapshot and how they move or change from one snapshot to the next; it can follow "
+             "a change only if that change shows in them.\n\n"
+             "Return {\"decision\": \"continue\", \"refine\" or \"switch\", \"image\": 3, 4 or 5 if you switch "
+             "(otherwise null), \"sees\": the feature the remaining generations build on (the description above, "
+             "unchanged, unless you switch; if you switch, one concrete, visible feature of that image, at most 25 "
+             "words), \"push\": the goal for the remaining generations (the same text if you continue; otherwise an "
+             "instruction starting with \"make\", at most 20 words), \"why\": one short sentence}."),
+    "fields": ["decision", "sees", "push", "why"]})      # "image" passes through describe.parse as an extra key
+
 # Goal-progress judge for the generative VLM (goal check after arm L, 10-29): the attain question, asked of Gemini as a
 # third judge beside Jev and Luna, to see which agrees with Felix's blind ratings.
 GOAL_JUDGE = "goal_judge_v1"

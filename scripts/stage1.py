@@ -32,6 +32,7 @@ Expedition v4 (Colab: GPU and Jev; see colab/mace.ipynb section 5c). Smoke test 
       --tag exp-v4-smoke --limit 2 --stop-after 3
   python scripts/stage1.py v4 --arm L --run RUNS/mace-qd5-sarch-s0 --out RUNS/stage1-s0 --backend auto --evals /content/evals
   ... then --arm N, NF, C; 11-04: --arm N-aim (after `aimgoals` and `captions --arm N-aim`; ends at step 10).
+  --arm NS-aim (after N-aim; Gemini signed in): N-aim's first 5 steps, one review (review_aim_v1), steps 6-10.
   Results in <out>/exp-v4/<arm>/: state.json, duels.csv (every child), trace.jsonl (picks),
   sheet.png (start | halfway | end), summary.md.
 
@@ -80,7 +81,7 @@ from lenia import backend
 from lenia.config import REPO_ROOT, load
 from lenia.judge import BudgetError, ChoiceQuery, Judge, MultiQuery, Query, load_env
 from lenia.mace import TILE as ME_TILE, mutate
-from lenia.prompts import (AIM_ALIFE, CAPTION, COMPLEXITY, NAMER, NAMER_AIM, NONE, REVIEW_R, REVIEW_S, SESSION_MATCH, STEER, SURPRISE, attain_prompt,
+from lenia.prompts import (AIM_ALIFE, CAPTION, COMPLEXITY, NAMER, NAMER_AIM, NONE, REVIEW_AIM, REVIEW_R, REVIEW_S, SESSION_MATCH, STEER, SURPRISE, attain_prompt,
                            steer_prompt)
 from lenia.sim import Rule
 
@@ -743,13 +744,27 @@ def capcheck(a) -> None:
 # Ours: the trigger expedition, the routes, arms NF and C. From papers: comma selection ((1,lambda)-ES; Rechenberg,
 # Schwefel), CLIP text targets for search (ASAL), foundation-model goals steering evolution (ASAL; the Picbreeder line).
 
-V4_DIR, V4_ARMS = "exp-v4", ("L", "N", "NF", "C", "N-aim")
+V4_DIR, V4_ARMS = "exp-v4", ("L", "N", "NF", "C", "N-aim", "NS-aim")
 # N-aim (11-04): aim-conditioned goals (NAMER_AIM, --aim; read from goals-aim/N-aim.json) and their captions
 # (captions/N-aim.json), routes from the
 # captions as in N. It keeps the 20-step mutation schedule and ends at step V4_AIM_END, so its 10 steps draw exactly
 # the mutations L's and N's first 10 did (same seeds; same step-1 children): against their stored step-10 worlds only
 # the goal differs. (v4's ratings: steps 11-20 added nothing, 4-3 with 5 can't-tell.)
 V4_AIM_END = 10
+# NS-aim (11-04): N-aim plus one aim-aware review (lenia.prompts.REVIEW_AIM) after step V4_REVIEW_AT. Its first 5 steps
+# ARE N-aim's: the arm starts from N-aim's state, duels and trace cut at step 5 (exact, since the expedition is
+# deterministic given its goals, seeds and caches; no regrowing). The reviewer sees the start, the current parent and
+# the 3 most surprising unchosen judged children of steps 3-5 (Jev's surprise vs the start, already in duels.csv;
+# those 3 are regrown and checked against their logged texture and motion), and chooses:
+# - continue: nothing changes, so steps 6-10 replay N-aim's (same parents, seeds and Jev cache);
+# - refine: a new push for the same feature; the reference stays the start;
+# - switch: the chosen child becomes the parent AND the reference that goal, complexity and surprise are judged
+#   against from then on (one combined request, as before; the complexity floor now means "no less complex than the
+#   new stepping stone"). Goal scores restart at 0.5.
+# A new goal gets a caption (goal_caption_v1, same model) for its route, from the picture its descendants start from.
+# Ours: the population-aware switch. From papers: the Picbreeder line (users branch from whichever offspring looks
+# promising; Secretan et al. 2011), here a VLM doing the branching.
+V4_REVIEW_AT, V4_REVIEW_KIDS = 5, 3
 V4_STEPS, V4_CHILDREN, V4_JUDGED = 20, 48, 16
 V4_SCHED, V4_MOTION = (2.0, 0.8), 1.0
 
@@ -816,6 +831,8 @@ def expedition_v4(a) -> None:
     if (adir / "state.json").exists():
         st = json.loads((adir / "state.json").read_text())
         print(f"arm {a.arm}: resuming after step {st['step']}", file=sys.stderr)
+    elif a.arm == "NS-aim":
+        st = v4_fork(s1 / a.tag / "N-aim", adir)
     else:
         st = v4_setup(a, s1, run, judge or _judges(a, s1))
         QD.save_state(adir, st)
@@ -826,23 +843,30 @@ def expedition_v4(a) -> None:
         t0 = json.loads((s1 / "triggers.json").read_text())["triggers"][0]    # the same trigger for every arm
         same_platform(s1, evals, st, ea, tag=f"{V4_DIR} sched={V4_SCHED[0]}-{V4_SCHED[1]} struct=0", scale=V4_SCHED[0],
                       struct=0.0, tr={"start_rule": t0["rule"], "index": 0})
+    if a.arm == "NS-aim" and not st.get("reviewed"):
+        v4_review(a, s1, adir, st, ea, evals)
+        QD.save_state(adir, st)
     clip = ClipScorer(a.clip)
     tile = lambda pic: np.asarray(pic)[-ME_TILE:, -ME_TILE:]
-    starts = {tr["index"]: _pic(s1, tr["start"]) for tr in st["triggers"]}
+    starts = {tr["index"]: _pic(s1, tr.get("ref", tr["start"])) for tr in st["triggers"]}   # ref: after an NS-aim switch
     end = st.get("end", st["steps"])         # arms run before 11-04 have no "end": they ran the whole schedule
     stop = min(end, a.stop_after or end)
     while st["step"] < stop:
         step, t0 = st["step"] + 1, time.time()
         scale = v4_scale(step, st["steps"])
         rules, owner = [], []
-        for tr in st["triggers"]:
+        live = [tr for tr in st["triggers"] if not tr.get("replayed")]     # NS-aim: continue triggers were copied
+        if not live:
+            st["step"] = end
+            break
+        for tr in live:
             rng = np.random.default_rng([st["seed"], tr["index"], step])      # the same draws in every arm
             for m in mutants_of(Rule.from_dict(tr["parent_rule"]), rng, st["children"], ea, scale, 0.0):
                 rules.append(m)
                 owner.append(tr["index"])
         ev = evals.get_many(rules)
         emb = clip.images([tile(v["pic"]) for v in ev])
-        byi = {tr["index"]: tr for tr in st["triggers"]}
+        byi = {tr["index"]: tr for tr in live}
         short, csc, rows = {}, {}, []
         for i, tr in byi.items():
             ks = [j for j, o in enumerate(owner) if o == i]
@@ -929,6 +953,152 @@ def expedition_v4(a) -> None:
         print(f"arm {a.arm}: {st['step']} of {end} steps; {adir / 'sheet.png'}, {adir / 'summary.md'}", file=sys.stderr)
 
 
+def v4_fork(src: Path, adir: Path) -> dict:
+    """NS-aim's start: N-aim's state, duels and trace cut at step V4_REVIEW_AT."""
+    if not (src / "state.json").exists():
+        sys.exit(f"{src} has no state.json: run arm N-aim first")
+    st = json.loads((src / "state.json").read_text())
+    if st["step"] < V4_REVIEW_AT:
+        sys.exit(f"arm N-aim has run {st['step']} steps; NS-aim forks it after step {V4_REVIEW_AT}")
+    tl = [json.loads(x) for x in (src / "trace.jsonl").read_text().splitlines() if x.strip()]
+    for tr in st["triggers"]:
+        tr["history"] = [h for h in tr["history"] if h["step"] <= V4_REVIEW_AT]
+        tr["stats"] = [x for x in tr["stats"] if x["step"] <= V4_REVIEW_AT]
+        picks = [x for x in tl if x["trigger"] == tr["id"] and x["step"] <= V4_REVIEW_AT]
+        if picks:
+            tr["parent_rule"], tr["parent"] = picks[-1]["rule"], picks[-1]["image"]
+            tr["g"], tr["k"], tr["s"] = picks[-1]["goal_score"], picks[-1]["complexity"], picks[-1]["surprise"]
+        else:
+            tr["parent_rule"], tr["parent"], tr["g"], tr["k"], tr["s"] = tr["start_rule"], tr["start"], 0.5, 0.5, 0.5
+        tr.pop("_trace", None)
+    st.update(arm="NS-aim", step=V4_REVIEW_AT, forked_from=f"N-aim@{V4_REVIEW_AT}", reviewed=False)
+    with open(src / "duels.csv") as fh:
+        rows = list(csv.reader(fh))
+    with open(adir / "duels.csv", "w", newline="") as fh:
+        csv.writer(fh).writerows([rows[0]] + [r for r in rows[1:] if int(r[0]) <= V4_REVIEW_AT])
+    with open(adir / "trace.jsonl", "w") as fh:
+        for x in tl:
+            if x["step"] <= V4_REVIEW_AT:
+                fh.write(json.dumps({**x, "arm": "NS-aim"}) + "\n")
+    QD.save_state(adir, st)
+    print(f"arm NS-aim: forked from {src} after step {V4_REVIEW_AT}", file=sys.stderr)
+    return st
+
+
+def v4_review(a, s1: Path, adir: Path, st: dict, ea, evals) -> None:
+    """NS-aim's one review (REVIEW_AIM): continue, refine or switch to one of the 3 most surprising recent children."""
+    from lenia.describe import Ask, Describer
+    rows = list(csv.DictReader(open(adir / "duels.csv")))
+    tl = [json.loads(x) for x in (adir / "trace.jsonl").read_text().splitlines() if x.strip()]
+    kids = {}
+    for tr in st["triggers"]:
+        cand = [r for r in rows if r["trigger"] == tr["id"] and V4_REVIEW_AT - 2 <= int(r["step"]) <= V4_REVIEW_AT
+                and r["shortlisted"] == "1" and r["picked"] == "0" and r["surprise"] not in ("", None)]
+        top = sorted(cand, key=lambda r: -float(r["surprise"]))[:V4_REVIEW_KIDS]
+        if len(top) < V4_REVIEW_KIDS:
+            sys.exit(f"{tr['id']}: only {len(top)} judged unchosen children in steps {V4_REVIEW_AT - 2}-{V4_REVIEW_AT}")
+        rules = []
+        for r in top:                        # regrow: the parent before step k, that step's seeded mutants, child j
+            k = int(r["step"])
+            prev = [x for x in tl if x["trigger"] == tr["id"] and x["step"] < k]
+            par = Rule.from_dict(prev[-1]["rule"] if prev else tr["start_rule"])
+            m = mutants_of(par, np.random.default_rng([st["seed"], tr["index"], k]), st["children"], ea,
+                           v4_scale(k, st["steps"]), 0.0)
+            rules.append(m[int(r["child"])])
+        kids[tr["id"]] = (top, rules)
+    ev = evals.get_many([r for _, rs in kids.values() for r in rs])
+    n = 0
+    for tid, (top, rules) in kids.items():
+        got = ev[n:n + len(rules)]
+        n += len(rules)
+        for r, e in zip(top, got):           # replay check against the logged descriptors
+            if abs(round(e["motion"], 4) - float(r["motion"])) > 1e-3 or abs(round(e["texture"], 4) - float(r["texture"])) > 1e-3:
+                print(f"WARNING {tid}: regrown child {r['step']}/{r['child']} differs from its log (motion "
+                      f"{e['motion']:.4f} vs {r['motion']}); the reviewer sees the regrown one", file=sys.stderr)
+            evals.persist(e)
+        kids[tid] = (top, rules, got)
+    d = _describer(a, s1)
+    asks = []
+    for tr in st["triggers"]:
+        top, rules, got = kids[tr["id"]]
+        byk = {h["step"]: h for h in tr["history"]}
+        prog = "; ".join(f"generation {k}: {byk[k]['goal_score']:.2f}" if k in byk else f"generation {k}: no child passed"
+                         for k in range(1, V4_REVIEW_AT + 1))
+        asks.append(Ask(REVIEW_AIM, [_pic(s1, tr["start"]), _pic(s1, tr["parent"])] + [e["pic"] for e in got],
+                        {"aim": st["aim"], "children": st["children"], "judged": st["judged"], "gens": V4_REVIEW_AT,
+                         "total": st["end"], "left": st["end"] - V4_REVIEW_AT, "sees": tr["goal"]["sees"],
+                         "push": tr["goal"]["push"], "progress": prog}))
+    ans = d.ask_many(asks, desc="NS-aim review")
+    if any(not r.ok for r in ans):
+        sys.exit("some review calls failed (not cached); re-run to retry them")
+    cfg = load(a.config)
+    cap = Describer(a.vlm, cfg["vlms"][a.vlm], s1 / "captions" / "caption_cache.sqlite", max_usd=a.max_caption_usd)
+    todo = []
+    for tr, r in zip(st["triggers"], ans):
+        top, rules, got = kids[tr["id"]]
+        dec = r.data["decision"].strip().lower()
+        img = r.data.get("image")
+        img = int(img) if str(img).strip() in ("3", "4", "5") else None
+        eff = dec if dec in ("continue", "refine") or (dec == "switch" and img) else "continue"
+        tr["review"] = {"decision": dec, "applied": eff, "image": img, "why": r.data.get("why"), "sees": r.data["sees"],
+                        "push": r.data["push"], "cost": round(r.cost, 6), "parent": tr["parent"], "g_before": tr["g"],
+                        "children": [{"step": int(x["step"]), "child": int(x["child"]), "surprise": float(x["surprise"]),
+                                      "image": e["image"]} for x, e in zip(top, got)]}
+        if eff == "continue":
+            continue
+        old = tr["goal"]
+        sees = old["sees"] if eff == "refine" else r.data["sees"]
+        g = {"id": goal_id(sees, r.data["push"]), "sees": sees, "push": r.data["push"], "source": f"review:{eff}",
+             "from_step": V4_REVIEW_AT + 1}
+        tr["goals_before"] = tr.get("goals_before", []) + [old]
+        tr["goal"] = g
+        if eff == "switch":
+            e = got[img - 3]
+            tr["parent_rule"], tr["parent"] = rules[img - 3].to_dict(), e["image"]
+            tr["ref"], tr["ref_rule"] = e["image"], tr["parent_rule"]
+            tr["g"], tr["k"], tr["s"] = 0.5, 0.5, 0.5
+        todo.append((tr, g))
+    if todo:                                 # captions for the new goals: they set the route and the CLIP target
+        cs = cap.ask_many([Ask(CAPTION, [_pic(s1, tr["parent"])], {"sees": g["sees"], "push": g["push"]}) for tr, g in todo],
+                          desc="NS-aim captions")
+        if any(not c.ok for c in cs):
+            sys.exit("some caption calls failed (not cached); re-run to retry them")
+        for (tr, g), c in zip(todo, cs):
+            end = _caption(c.data["end"])
+            tr["caption"] = {"end": end, "start": "none" if end == "none" else _caption(c.data["start"])}
+            tr["route"] = "clip" if end != "none" else "floor"
+            tr["target"] = end if end != "none" else g["push"]
+    keep = [tr for tr in st["triggers"] if tr["review"]["applied"] == "continue"]
+    if keep:                                 # continue = N-aim's steps 6-10 exactly (checked 11-04): copy, don't regrow
+        src = s1 / a.tag / "N-aim"
+        nst = json.loads((src / "state.json").read_text())
+        if nst["step"] != st["end"]:
+            sys.exit(f"arm N-aim has run {nst['step']} of {st['end']} steps; finish it before NS-aim's continue triggers copy it")
+        nby = {t["id"]: t for t in nst["triggers"]}
+        ids = {tr["id"] for tr in keep}
+        for tr in keep:
+            n = nby[tr["id"]]
+            for k in ("history", "stats", "parent_rule", "parent", "g", "k", "s"):
+                tr[k] = n[k]
+            tr["replayed"] = f"N-aim steps {V4_REVIEW_AT + 1}-{st['end']}"
+        with open(src / "duels.csv") as fh, open(adir / "duels.csv", "a", newline="") as out:
+            csv.writer(out).writerows(r for r in list(csv.reader(fh))[1:] if int(r[0]) > V4_REVIEW_AT and r[1] in ids)
+        with open(adir / "trace.jsonl", "a") as out:
+            for x in (json.loads(y) for y in (src / "trace.jsonl").read_text().splitlines() if y.strip()):
+                if x["step"] > V4_REVIEW_AT and x["trigger"] in ids:
+                    out.write(json.dumps({**x, "arm": "NS-aim"}) + "\n")
+    st["reviewed"] = True
+    L = [f"# NS-aim review after step {V4_REVIEW_AT} ({REVIEW_AIM}, {a.vlm})\n",
+         "| trigger | decision | image | goal before | goal after | why |", "|---|---|---|---|---|---|"]
+    for tr in st["triggers"]:
+        v = tr["review"]
+        before = (tr.get("goals_before") or [tr["goal"]])[-1]["push"]
+        L.append(f"| {tr['id']} | {v['applied']}{'' if v['applied'] == v['decision'] else ' (asked ' + v['decision'] + ')'} | "
+                 f"{v['image'] or '-'} | {before} | {tr['goal']['push'] if v['applied'] != 'continue' else '='} | {v['why']} |")
+    (adir / "review.md").write_text("\n".join(L) + "\n")
+    print("\n".join(L), file=sys.stderr)
+
+
 def v4_sheet(s1: Path, st: dict, path: Path, px: int = 260) -> None:
     """One row per trigger: start | the parent halfway | the end, with the goal, route and CLIP target."""
     head, cols = 42, 3
@@ -964,6 +1134,11 @@ def v4_summary(st: dict, path: Path) -> None:
                  + (f"{tr['g']:.2f} | {tr['k']:.2f}" if st["arm"] != "C" else "- | -")
                  + f" | {f(a['clip_mean'])} -> {f(b['clip_mean'])} | {f(a['motion_mean'])} -> {f(b['motion_mean'])} | "
                    f"{f(a['jev_mean_judged'])} -> {f(b['jev_mean_judged'])} |")
+    if any("review" in tr for tr in st["triggers"]):
+        from collections import Counter as _C
+        c = _C(tr["review"]["applied"] for tr in st["triggers"] if "review" in tr)
+        L.append(f"\nReview after step {V4_REVIEW_AT}: " + ", ".join(f"{k} {v}" for k, v in sorted(c.items())) +
+                 " (see review.md). Goal and complexity of switched triggers are against their new stepping stone.")
     path.write_text("\n".join(L) + "\n")
 
 
@@ -1031,7 +1206,12 @@ def _gif(frames: list, snaps: np.ndarray, path: Path, px: int, fps: int) -> None
 # - end-vs-start:N-aim and control:N-aim (a random unselected step-1 child of N-aim's, against the start, with N-aim's
 #   goal), all 12 triggers: does steering still show with these goals?
 # The report also splits the interest groups by goal type (goals-aim/goal_types.json, tagged before the run).
-RATE_DIRS = {"v4": "rate-v4", "aim": "rate-aim"}
+# The NS-aim session (--session ns), in <out>/rate-ns/: only triggers whose review changed something (continue replays
+# N-aim exactly, so its end equals N-aim's and the pair is skipped):
+# - interest:NSaim-vs-Naim:<refine|switch>: did the review make the end world more interesting?
+# - end-vs-ref:<refine|switch>: does the end show the review's new goal, against the world it was judged against
+#   (the start for refine, the new stepping stone for switch)?
+RATE_DIRS = {"v4": "rate-v4", "aim": "rate-aim", "ns": "rate-ns"}
 
 
 def v4rate(a) -> None:
@@ -1042,6 +1222,8 @@ def v4rate(a) -> None:
         from lenia.rating import rate_pairs
         return rate_pairs(rdir, port=a.port)
     if a.step == "report":
+        if a.session == "ns":
+            return v4rate_report(rdir, title="Aim-aware review (arm NS-aim)", arms=(), controls=())
         if a.session == "aim":
             gt = s1 / "goals-aim" / "goal_types.json"
             types = json.loads(gt.read_text())["types"] if gt.exists() else None
@@ -1126,6 +1308,26 @@ def v4rate(a) -> None:
             add("interest:Naim-vs-N", "interest", tid, na, world("N", tid, f"at{V4_AIM_END}"))
             add("end-vs-start:N-aim", "goal", tid, na, start(t), goal("N-aim", tid))
             add("control:N-aim", "goal", tid, control(t, i, "N-aim"), start(t), goal("N-aim", tid))
+    if a.session == "ns":
+        if not have("NS-aim", "N-aim"):
+            sys.exit(f"the ns session needs arms NS-aim and N-aim in {s1 / a.tag}")
+        if S["NS-aim"]["_st"]["step"] != V4_AIM_END:
+            sys.exit(f"arm NS-aim has run {S['NS-aim']['_st']['step']} steps, not {V4_AIM_END}")
+        for t in T:
+            tid = t["id"]
+            if not have("NS-aim", "N-aim", tid=tid):
+                continue
+            tr = S["NS-aim"][tid]
+            dec = tr.get("review", {}).get("applied", "continue")
+            if dec == "continue":
+                continue
+            add(f"interest:NSaim-vs-Naim:{dec}", "interest", tid, world("NS-aim", tid, "end"), world("N-aim", tid, "end"))
+            if dec == "switch":
+                ref = f"ref:NS-aim:{tid}"
+                W.setdefault(ref, {"rule": tr["ref_rule"], "still": tr["ref"]})
+            else:
+                ref = start(t)
+            add(f"end-vs-ref:{dec}", "goal", tid, world("NS-aim", tid, "end"), ref, tr["goal"])
     for i, t in enumerate(T if a.session == "v4" else []):
         tid = t["id"]
         for arm in ("N", "L"):
@@ -1967,7 +2169,9 @@ def main() -> None:
                    "to <out>/evals)")
     v.add_argument("--max-usd", type=float, default=7.5, help="hard cap on the --out Jev cache's TOTAL spend (all arms, "
                    "earlier expeditions included: $3.70 before v4, about $5.85 after it; N-aim adds about $0.45)")
-    v.add_argument("--max-vlm-usd", type=float, default=0.0)
+    v.add_argument("--max-vlm-usd", type=float, default=1.5, help="arm NS-aim: hard cap on the --out describe cache's "
+                   "TOTAL spend (the review)")
+    v.add_argument("--max-caption-usd", type=float, default=0.5, help="arm NS-aim: cap on the caption cache's total spend")
     for k in ("size", "warmup", "render", "gap", "sim_batch"):
         v.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
     mc = sub.add_parser("mergecache", help="add a cache's missing answers to another (SQLite, by key; backs up the destination)")
@@ -1976,8 +2180,9 @@ def main() -> None:
     mc.add_argument("--dry", action="store_true", help="count only")
     r4 = sub.add_parser("v4rate", help="v4's blind session: build (Colab: films), rate (Mac page), report")
     r4.add_argument("step", choices=["build", "refilm", "rate", "report"])
-    r4.add_argument("--session", default="v4", choices=sorted(RATE_DIRS), help="v4 (rate-v4) or aim (rate-aim: N-aim vs "
-                    "L and N at step 10, N-aim end vs start with controls)")
+    r4.add_argument("--session", default="v4", choices=sorted(RATE_DIRS), help="v4 (rate-v4), aim (rate-aim: N-aim vs "
+                    "L and N at step 10, N-aim end vs start with controls) or ns (rate-ns: NS-aim vs N-aim where the "
+                    "review changed something)")
     r4.add_argument("--out", required=True, help="this seed's Stage 1 folder (the session goes to <out>/rate-v4)")
     r4.add_argument("--run", default=None, help="the base run (build and refilm)")
     r4.add_argument("--tag", default=V4_DIR)
