@@ -460,3 +460,115 @@ def rate_goal_pairs(out, port: int = 8772, open_browser: bool = True) -> None:
         srv.serve_forever()
     except KeyboardInterrupt:
         pass
+
+
+# ---------- expedition v4's blind session (11-03): films + stills, two kinds of question ----------
+
+PAIRS_PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Blind pairs</title>
+<style>
+ body{font-family:system-ui,sans-serif;margin:0;background:#f4f4f2;color:#222}
+ header{padding:10px 20px;display:flex;justify-content:space-between;align-items:baseline}
+ h1{font-size:17px;margin:0} #prog{color:#666}
+ .goal{margin:0 20px 8px;background:#fff;border-radius:8px;padding:8px 14px;line-height:1.4}
+ .lab{font-size:12px;color:#777;text-transform:uppercase;letter-spacing:.04em}
+ .pair{display:flex;gap:16px;justify-content:center;padding:0 20px}
+ .w{display:flex;flex-direction:column;align-items:center;gap:6px}
+ .w img.film{width:min(44vw,460px);border-radius:6px;background:#000}
+ .w img.still{width:min(30vw,300px);border-radius:4px;background:#000;opacity:.95}
+ .btns{text-align:center;padding:10px} button{font-size:16px;padding:9px 18px;margin:0 6px;border-radius:6px;border:1px solid #bbb;
+ background:#fff;cursor:pointer} button:hover{background:#333;color:#fff}
+ .hint{text-align:center;color:#777;font-size:13px;padding-bottom:12px}
+</style></head><body>
+<header><h1 id="q"></h1><span id="prog"></span></header>
+<div class="goal" id="gbox"><div class="lab">the start world showed</div><div id="sees"></div>
+<div class="lab" style="margin-top:6px">wanted change</div><div id="push"></div></div>
+<div class="pair"><div class="w"><img class="film" id="Lf"><img class="still" id="Ls"></div>
+<div class="w"><img class="film" id="Rf"><img class="still" id="Rs"></div></div>
+<div class="btns"><button data-a="left">&larr; left</button><button data-a="neither">neither / can't tell (&darr;)</button>
+<button data-a="right">right &rarr;</button></div>
+<div class="hint" id="hint"></div>
+<script>
+const Q={goal:["Which world shows the wanted change more clearly?",
+ "Judge only the wanted change, not which world is nicer. Films loop over the snapshot window; below each, its four snapshots in reading order."],
+ interest:["Which world is more interesting as artificial life?",
+ "Richer structure or behaviour, more like something alive, more worth exploring further. Films loop over the snapshot window; below each, its four snapshots."]};
+let todo=[],cur=null,busy=false;
+async function load(){todo=await (await fetch('/todo')).json();show();}
+function show(){document.getElementById('prog').textContent=todo.length+' left';
+ if(!todo.length){document.body.innerHTML='<p style="padding:20px">All done. You can close this tab.</p>';return;}
+ cur=todo[0];const q=Q[cur.question];document.getElementById('q').textContent=q[0];document.getElementById('hint').textContent=q[1];
+ document.getElementById('gbox').style.display=cur.question==='goal'?'block':'none';
+ document.getElementById('sees').textContent=cur.sees||'';document.getElementById('push').textContent=cur.push||'';
+ for(const [s,n] of [['L',cur.left],['R',cur.right]]){document.getElementById(s+'f').src='/img/'+n+'.gif';
+  document.getElementById(s+'s').src='/img/'+n+'.png';}}
+async function vote(a){if(busy||!cur)return;busy=true;await fetch('/answer',{method:'POST',body:JSON.stringify({id:cur.id,answer:a})});
+ todo.shift();busy=false;show();}
+document.querySelectorAll('button[data-a]').forEach(b=>b.onclick=()=>vote(b.dataset.a));
+document.addEventListener('keydown',e=>{const k={ArrowLeft:'left',ArrowRight:'right',ArrowDown:'neither'}[e.key];if(k){e.preventDefault();vote(k);}});
+load();
+</script></body></html>"""
+
+
+def rate_pairs(out, port: int = 8773, open_browser: bool = True) -> None:
+    """Blind 2AFC with films: <out>/tasks.json [{id, question: goal | interest, sees, push, left, right, ...}] (only
+    those fields reach the page), <out>/images/<name>.gif and .png; answers -> <out>/ratings.csv. Progress is kept.
+    Keys: left / right arrows, down = neither."""
+    import webbrowser
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    out = Path(out)
+    keep = ("id", "question", "sees", "push", "left", "right")
+    tasks = [{k: t.get(k) for k in keep} for t in json.loads((out / "tasks.json").read_text())]
+    lock = threading.Lock()
+    types = {".gif": "image/gif", ".png": "image/png"}
+
+    def done():
+        p = out / "ratings.csv"
+        return {int(r["id"]) for r in csv.DictReader(open(p))} if p.exists() else set()
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *x):
+            pass
+
+        def _send(self, code, body, ctype):
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/":
+                return self._send(200, PAIRS_PAGE.encode(), "text/html; charset=utf-8")
+            if self.path == "/todo":
+                d = done()
+                return self._send(200, json.dumps([t for t in tasks if t["id"] not in d]).encode(), "application/json")
+            if self.path.startswith("/img/"):
+                f = out / "images" / Path(self.path).name
+                if f.exists() and f.suffix in types:
+                    return self._send(200, f.read_bytes(), types[f.suffix])
+            self._send(404, b"not found", "text/plain")
+
+        def do_POST(self):
+            x = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+            with lock:
+                if int(x["id"]) in done():
+                    return self._send(200, b"ok", "text/plain")
+                p = out / "ratings.csv"
+                new = not p.exists()
+                with open(p, "a", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=["time", "id", "answer"])
+                    if new:
+                        w.writeheader()
+                    w.writerow({"time": round(time.time(), 1), "id": x["id"], "answer": x["answer"]})
+            self._send(200, b"ok", "text/plain")
+
+    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+    url = f"http://127.0.0.1:{srv.server_address[1]}/"
+    print(f"rating page: {url} ({len(tasks) - len(done())} of {len(tasks)} left; answers go to {out / 'ratings.csv'}; "
+          "Ctrl-C to stop, progress is kept)")
+    if open_browser:
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass

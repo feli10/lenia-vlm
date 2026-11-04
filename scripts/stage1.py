@@ -825,6 +825,226 @@ def v4_summary(st: dict, path: Path) -> None:
     path.write_text("\n".join(L) + "\n")
 
 
+# ---------- v4's blind rating session (11-03) ----------
+#
+# Felix rates on the Mac; worlds are shown as films (the snapshot window, every --every steps) above their four stills
+# (the stored picture Jev saw; regrown for the controls, whose pictures were not kept). Two questions:
+# - goal ("which shows the wanted change more clearly?", the goal's sees and push shown): only between worlds that
+#   pursued the same goal. Groups: end vs start for N and L (does steering show?), control vs start (a random
+#   unselected step-1 child: what an unsteered change scores; 6 triggers with N's goal, 6 with L's), N vs C (does Jev
+#   add to CLIP alone?), N vs NF (does the CLIP shortlist help on the same goals?), end vs step 10 (do steps 11-20 help?);
+# - interest ("which is more interesting as artificial life?", no goal shown): between arms whose goals differ, the
+#   Stage 1 question. N vs L on L's 6 captioned triggers, NF vs L on L's 6 uncaptioned ones (no CLIP on either side).
+# Sides and order random; images named by hash; arm names stay in tasks.json and never reach the page.
+# Replay check: each regrown world's stills are compared with the stored picture; a world whose replay differs
+# (mean |pixel difference| > REPLAY_TOL) shows its stored stills but no film, and is listed in replay.json.
+
+REPLAY_TOL = 6.0
+
+
+def v4_films(rules: list, ea, every: int) -> list:
+    """Grow rules from the fixed start as QD.evaluate does; per rule: (frames of the snapshot window, picture)."""
+    from lenia import mace as ME, seeds
+    shape = (ea.size, ea.size)
+    A0 = seeds.smooth_noise(ea.R, shape, 3, seed=ea.start_seed, size_r=3.0)
+    steps = ea.warmup + ea.render
+    gap = min(ea.gap, steps // (ME.FRAMES - 1))
+    keep = {steps - i * gap for i in range(ME.FRAMES)}
+    out = []
+    for k in range(0, len(rules), ea.sim_batch):
+        rr = rules[k:k + ea.sim_batch]
+        b = backend.make_batch(rr, shape)
+        X = backend.to_device(np.stack([A0] * len(rr)))
+        films, snaps = [[] for _ in rr], [[] for _ in rr]
+        for t in range(1, steps + 1):
+            X = b.step(X)
+            film_t = t >= ea.warmup and (t - ea.warmup) % every == 0
+            if film_t or t in keep:
+                x = backend.to_numpy(X).copy()
+                for j in range(len(rr)):
+                    if film_t:
+                        films[j].append(x[j])
+                    if t in keep:
+                        snaps[j].append(x[j])
+        for f, sn in zip(films, snaps):
+            out.append((f, ME.picture(np.stack(sn)), np.stack(sn)))
+        print(f"films: {min(k + ea.sim_batch, len(rules))}/{len(rules)} worlds", file=sys.stderr)
+    return out
+
+
+def _gif(frames: list, snaps: np.ndarray, path: Path, px: int, fps: int) -> None:
+    from lenia import render
+    scale = max(float(np.percentile(snaps, 99.5)), 1e-6)       # the stills' brightness, so film and stills match
+    ims = [Image.fromarray(render.colorize(np.clip(f / scale, 0, 1))).resize((px, px), Image.BILINEAR)
+           .quantize(colors=128, method=Image.MEDIANCUT, dither=Image.NONE) for f in frames]
+    ims[0].save(path, save_all=True, append_images=ims[1:], duration=int(1000 / fps), loop=0, optimize=True)
+
+
+def v4rate(a) -> None:
+    import hashlib
+    s1 = Path(a.out)
+    rdir = s1 / "rate-v4"
+    if a.step == "rate":
+        from lenia.rating import rate_pairs
+        return rate_pairs(rdir, port=a.port)
+    if a.step == "report":
+        return v4rate_report(rdir)
+    if (rdir / "tasks.json").exists():
+        sys.exit(f"{rdir / 'tasks.json'} exists; the session is built (move the folder aside to rebuild)")
+    run = Path(a.run)
+    backend.configure(a.backend)
+    ea = eval_settings(run, a)
+    T = json.loads((s1 / "triggers.json").read_text())["triggers"]
+    S, TR = {}, {}
+    for arm in V4_ARMS:
+        f = s1 / a.tag / arm / "state.json"
+        if f.exists():
+            S[arm] = {tr["id"]: tr for tr in json.loads(f.read_text())["triggers"]}
+            S[arm]["_st"] = json.loads(f.read_text())
+            TR[arm] = [json.loads(x) for x in (s1 / a.tag / arm / "trace.jsonl").read_text().splitlines() if x.strip()]
+        else:
+            print(f"arm {arm}: not run, its pairs are skipped", file=sys.stderr)
+    rng = np.random.default_rng([a.seed, 404])
+    W = {}                                   # world name -> {"rule", "still" (stored picture, relative) or None}
+
+    def world(arm, tid, which):
+        name = f"{arm}:{tid}:{which}"
+        if name not in W:
+            tr = S[arm][tid]
+            if which == "end":
+                W[name] = {"rule": tr["parent_rule"], "still": tr["parent"]}
+            else:                            # the parent halfway, as on the sheet
+                mid = S[arm]["_st"]["step"] // 2
+                h = next((x for x in reversed(TR[arm]) if x["trigger"] == tid and x["step"] <= mid), None)
+                W[name] = ({"rule": h["rule"], "still": h["image"]} if h else {"rule": tr["start_rule"], "still": tr["start"]})
+        return name
+
+    def start(t):
+        W.setdefault(f"start:{t['id']}", {"rule": t["rule"], "still": f"img/{t['image']}"})
+        return f"start:{t['id']}"
+
+    def control(t, i):                       # a random unselected step-1 child (the same children in every arm)
+        name = f"ctrl:{t['id']}"
+        if name not in W:
+            arm = "N" if "N" in S else next(iter(S))
+            st = S[arm]["_st"]
+            rows = [r for r in csv.DictReader(open(s1 / a.tag / arm / "duels.csv"))
+                    if r["trigger"] == t["id"] and r["step"] == "1" and r["picked"] == "0"
+                    and (ea.max_texture <= 0 or float(r["texture"]) <= ea.max_texture)]
+            j = int(rows[int(rng.integers(len(rows)))]["child"])
+            kids = mutants_of(Rule.from_dict(t["rule"]), np.random.default_rng([st["seed"], i, 1]), st["children"], ea,
+                              v4_scale(1, st["steps"]), 0.0)
+            W[name] = {"rule": kids[j].to_dict(), "still": None, "child": j}
+        return name
+
+    goal = lambda arm, tid: S[arm][tid]["goal"]
+    tasks = []
+
+    def add(group, q, tid, x, y, g=None):
+        if W[x]["rule"] == W[y]["rule"]:
+            return                           # the same world: nothing to rate
+        tasks.append({"group": group, "question": q, "trigger": tid, "a": x, "b": y,
+                      "sees": g["sees"] if g else None, "push": g["push"] if g else None})
+    have = lambda *arms, tid=None: all(x in S and (tid is None or tid in S[x]) for x in arms)
+    cap = {tid: S["L"][tid]["route"] for tid in S["L"] if tid != "_st"} if "L" in S else {}
+    for i, t in enumerate(T):
+        tid = t["id"]
+        for arm in ("N", "L"):
+            if have(arm, tid=tid):
+                add(f"end-vs-start:{arm}", "goal", tid, world(arm, tid, "end"), start(t), goal(arm, tid))
+        if have("N", "C", tid=tid):
+            add("N-vs-C", "goal", tid, world("N", tid, "end"), world("C", tid, "end"), goal("N", tid))
+        if have("N", "NF", tid=tid):
+            add("N-vs-NF", "goal", tid, world("N", tid, "end"), world("NF", tid, "end"), goal("N", tid))
+        if have("N", "L", tid=tid) and cap.get(tid) == "clip":
+            add("interest:N-vs-L", "interest", tid, world("N", tid, "end"), world("L", tid, "end"))
+        elif have("NF", "L", tid=tid):
+            add("interest:NF-vs-L", "interest", tid, world("NF", tid, "end"), world("L", tid, "end"))
+    ids = [t["id"] for t in T]
+    order = [ids[k] for k in rng.permutation(len(ids))]
+    for n, tid in enumerate(order):          # controls: half with N's goal, half with L's
+        arm = ("N" if n % 2 == 0 else "L") if have("N", "L") else next(iter(S))
+        t = T[ids.index(tid)]
+        if have(arm, tid=tid):
+            add(f"control:{arm}", "goal", tid, control(t, ids.index(tid)), start(t), goal(arm, tid))
+    for arm, tids in (("N", order[:6]), ("L", order[6:12])):  # end vs halfway: 6 triggers per arm, disjoint
+        for tid in tids:
+            if have(arm, tid=tid):
+                add(f"end-vs-mid:{arm}", "goal", tid, world(arm, tid, "end"), world(arm, tid, "mid"), goal(arm, tid))
+    names = sorted(W)
+    print(f"{len(tasks)} pairs over {len(names)} worlds; growing their films", file=sys.stderr)
+    res = v4_films([Rule.from_dict(W[n]["rule"]) for n in names], ea, a.every)
+    (rdir / "images").mkdir(parents=True, exist_ok=True)
+    salt = rng.integers(1 << 30)
+    replay = {}
+    for n, (frames, pic, snaps) in zip(names, res):
+        h = hashlib.sha1(f"{n}|{salt}".encode()).hexdigest()[:12]
+        W[n]["file"] = h
+        stored = W[n]["still"]
+        if stored and (s1 / stored).exists():
+            ref = np.asarray(Image.open(s1 / stored).convert("RGB"), np.int16)
+            d = float(np.abs(ref - pic.astype(np.int16)).mean()) if ref.shape == pic.shape else float("inf")
+            replay[n] = round(d, 2)
+            Image.open(s1 / stored).convert("RGB").save(rdir / "images" / f"{h}.png")
+        else:
+            d = 0.0
+            Image.fromarray(pic).save(rdir / "images" / f"{h}.png")
+        if d <= REPLAY_TOL:
+            _gif(frames, snaps, rdir / "images" / f"{h}.gif", a.px, a.fps)
+        else:                                # the replay diverged: stills only (the page shows the PNG in both slots)
+            Image.open(rdir / "images" / f"{h}.png").save(rdir / "images" / f"{h}.gif")
+    out = []
+    for k in rng.permutation(len(tasks)):
+        t = tasks[k]
+        l, r = (t["a"], t["b"]) if rng.random() < 0.5 else (t["b"], t["a"])
+        out.append({"id": len(out), **t, "left": W[l]["file"], "right": W[r]["file"], "left_world": l, "right_world": r})
+    (rdir / "tasks.json").write_text(json.dumps(out, indent=1))
+    bad = {n: d for n, d in replay.items() if d > REPLAY_TOL}
+    (rdir / "replay.json").write_text(json.dumps({"tol": REPLAY_TOL, "diff": replay, "diverged": bad,
+                                                   "controls": {n: W[n]["child"] for n in W if n.startswith("ctrl:")}}, indent=1))
+    print(f"wrote {rdir}: {len(out)} pairs ({dict(Counter(t['group'] for t in out))}); replay: {len(replay)} stored "
+          f"pictures compared, median diff {np.median(list(replay.values())) if replay else float('nan'):.2f}, "
+          f"{len(bad)} diverged (stills only)", file=sys.stderr)
+
+
+def _binom_greater(k: int, n: int) -> float:
+    """One-sided sign test: P(X >= k), X ~ Binomial(n, 1/2)."""
+    from math import comb
+    return float(sum(comb(n, j) for j in range(k, n + 1)) / 2 ** n) if n else float("nan")
+
+
+def v4rate_report(rdir: Path) -> None:
+    from lenia.stats import fisher_greater
+    tasks = {t["id"]: t for t in json.loads((rdir / "tasks.json").read_text())}
+    R = {int(r["id"]): r["answer"] for r in csv.DictReader(open(rdir / "ratings.csv"))}
+    by = {}
+    for i, ans in R.items():
+        t = tasks[i]
+        win = None if ans == "neither" else (t["left_world"] if ans == "left" else t["right_world"]) == t["a"]
+        by.setdefault(t["group"], []).append(win)
+    rows, L = {}, [f"# Expedition v4: blind ratings ({len(R)} of {len(tasks)} pairs rated)\n",
+                   "First-named world = the one counted as a win (end, N, NF ...). Neither = can't tell.\n",
+                   "| group | wins | losses | neither | win rate (decided) | one-sided p |", "|---|---|---|---|---|---|"]
+    for g in sorted(by):
+        v = by[g]
+        w, l_ = sum(x is True for x in v), sum(x is False for x in v)
+        rows[g] = (w, l_)
+        L.append(f"| {g} | {w} | {l_} | {sum(x is None for x in v)} | {w / max(1, w + l_):.2f} | {_binom_greater(w, w + l_):.3f} |")
+    L.append("\np: sign test against a coin flip, except below. Does steering beat an unsteered change "
+             "(end vs start against control vs start, Fisher one-sided)?")
+    for arm in ("N", "L"):
+        e = rows.get(f"end-vs-start:{arm}")
+        cc = tuple(map(sum, zip(*[rows[g] for g in ("control:N", "control:L") if g in rows]))) if any(
+            g in rows for g in ("control:N", "control:L")) else None
+        if e and cc:
+            L.append(f"- {arm}: end beats start {e[0]}/{sum(e)}, controls {cc[0]}/{sum(cc)}: "
+                     f"p = {fisher_greater(e[0], e[1], cc[0], cc[1]):.3f}")
+    sides = list(R.values())
+    L.append(f"\nSides: {sides.count('left')} left, {sides.count('right')} right, {sides.count('neither')} neither.")
+    (rdir / "report.md").write_text("\n".join(L) + "\n")
+    print("\n".join(L))
+
+
 def setup_arm(a, s1: Path, run: Path, T: list, judge) -> dict:
     """The arm's goal per trigger, and the starting state."""
     starts = [_pic(s1, f"img/{t['image']}") for t in T]
@@ -1461,8 +1681,21 @@ def main() -> None:
     v.add_argument("--max-vlm-usd", type=float, default=0.0)
     for k in ("size", "warmup", "render", "gap", "sim_batch"):
         v.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
+    r4 = sub.add_parser("v4rate", help="v4's blind session: build (Colab: films), rate (Mac page), report")
+    r4.add_argument("step", choices=["build", "rate", "report"])
+    r4.add_argument("--out", required=True, help="this seed's Stage 1 folder (the session goes to <out>/rate-v4)")
+    r4.add_argument("--run", default=None, help="the base run (build only)")
+    r4.add_argument("--tag", default=V4_DIR)
+    r4.add_argument("--backend", default="numpy")
+    r4.add_argument("--seed", type=int, default=0)
+    r4.add_argument("--every", type=int, default=30, help="simulation steps per film frame")
+    r4.add_argument("--px", type=int, default=280)
+    r4.add_argument("--fps", type=int, default=15)
+    r4.add_argument("--port", type=int, default=8773)
+    for k in ("size", "warmup", "render", "gap", "sim_batch"):
+        r4.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
     a = ap.parse_args()
-    {"v4": expedition_v4, "capcheck": capcheck, "captions": captions, "triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check, "goalcheck": goalcheck,
+    {"v4rate": v4rate, "v4": expedition_v4, "capcheck": capcheck, "captions": captions, "triggers": triggers, "sheet": sheet, "expedition": expedition, "check": check, "goalcheck": goalcheck,
      "heritability": heritability}[a.cmd](a)
 
 
