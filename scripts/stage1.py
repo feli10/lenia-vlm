@@ -836,8 +836,10 @@ def v4_summary(st: dict, path: Path) -> None:
 # - interest ("which is more interesting as artificial life?", no goal shown): between arms whose goals differ, the
 #   Stage 1 question. N vs L on L's 6 captioned triggers, NF vs L on L's 6 uncaptioned ones (no CLIP on either side).
 # Sides and order random; images named by hash; arm names stay in tasks.json and never reach the page.
-# Replay check: each regrown world's stills are compared with the stored picture; a world whose replay differs
-# (mean |pixel difference| > REPLAY_TOL) shows its stored stills but no film, and is listed in replay.json.
+# Replay check: each regrown world's stills are compared with the stored picture. A world whose replay differs
+# (mean |pixel difference| > REPLAY_TOL; 11-03: 7 of the 12 trigger starts, stored by the base run on other hardware)
+# shows its regrown film and regrown stills, so both sides of every pair have a film and the stills match it; the
+# rest show their stored stills (what Jev saw). Listed in replay.json either way.
 
 REPLAY_TOL = 6.0
 
@@ -889,8 +891,13 @@ def v4rate(a) -> None:
         return rate_pairs(rdir, port=a.port)
     if a.step == "report":
         return v4rate_report(rdir)
-    if (rdir / "tasks.json").exists():
-        sys.exit(f"{rdir / 'tasks.json'} exists; the session is built (move the folder aside to rebuild)")
+    if a.step == "refilm":
+        return v4rate_refilm(a, s1, rdir)
+    if (rdir / "tasks.json").exists() and not a.force:
+        sys.exit(f"{rdir / 'tasks.json'} exists; the session is built (--force rebuilds it: same seed, same pairs, "
+                 "but only before any rating)")
+    if a.force and (rdir / "ratings.csv").exists():
+        sys.exit(f"{rdir / 'ratings.csv'} exists: ratings were made against this build; not rebuilding")
     run = Path(a.run)
     backend.configure(a.backend)
     ea = eval_settings(run, a)
@@ -981,18 +988,16 @@ def v4rate(a) -> None:
         h = hashlib.sha1(f"{n}|{salt}".encode()).hexdigest()[:12]
         W[n]["file"] = h
         stored = W[n]["still"]
+        d = None
         if stored and (s1 / stored).exists():
             ref = np.asarray(Image.open(s1 / stored).convert("RGB"), np.int16)
             d = float(np.abs(ref - pic.astype(np.int16)).mean()) if ref.shape == pic.shape else float("inf")
             replay[n] = round(d, 2)
+        if d is not None and d <= REPLAY_TOL:
             Image.open(s1 / stored).convert("RGB").save(rdir / "images" / f"{h}.png")
-        else:
-            d = 0.0
+        else:                                # no stored picture, or the replay diverged: the regrown stills
             Image.fromarray(pic).save(rdir / "images" / f"{h}.png")
-        if d <= REPLAY_TOL:
-            _gif(frames, snaps, rdir / "images" / f"{h}.gif", a.px, a.fps)
-        else:                                # the replay diverged: stills only (the page shows the PNG in both slots)
-            Image.open(rdir / "images" / f"{h}.png").save(rdir / "images" / f"{h}.gif")
+        _gif(frames, snaps, rdir / "images" / f"{h}.gif", a.px, a.fps)
     out = []
     for k in rng.permutation(len(tasks)):
         t = tasks[k]
@@ -1004,7 +1009,31 @@ def v4rate(a) -> None:
                                                    "controls": {n: W[n]["child"] for n in W if n.startswith("ctrl:")}}, indent=1))
     print(f"wrote {rdir}: {len(out)} pairs ({dict(Counter(t['group'] for t in out))}); replay: {len(replay)} stored "
           f"pictures compared, median diff {np.median(list(replay.values())) if replay else float('nan'):.2f}, "
-          f"{len(bad)} diverged (stills only)", file=sys.stderr)
+          f"{len(bad)} diverged (shown regrown)", file=sys.stderr)
+
+
+def v4rate_refilm(a, s1: Path, rdir: Path) -> None:
+    """Give every world the replay check flagged a film and matching stills, regrown here (11-03: the 7 diverged trigger
+    starts of a build that showed them as stills only). Writes over their files in place (same hashed names), so the
+    pairs are unchanged; refused once ratings exist. Starts only: every other world replayed exactly."""
+    if (rdir / "ratings.csv").exists():
+        sys.exit(f"{rdir / 'ratings.csv'} exists: ratings were made against these files; not changing them")
+    backend.configure(a.backend)
+    ea = eval_settings(Path(a.run), a)
+    rp = json.loads((rdir / "replay.json").read_text())
+    files = {}
+    for t in json.loads((rdir / "tasks.json").read_text()):
+        files[t["left_world"]], files[t["right_world"]] = t["left"], t["right"]
+    rules = {f"start:{t['id']}": t["rule"] for t in json.loads((s1 / "triggers.json").read_text())["triggers"]}
+    todo = sorted(n for n in rp["diverged"] if n in files)
+    if any(n not in rules for n in todo):
+        sys.exit(f"only starts can be refilmed here: {[n for n in todo if n not in rules]}")
+    for n, (frames, pic, snaps) in zip(todo, v4_films([Rule.from_dict(rules[n]) for n in todo], ea, a.every)):
+        Image.fromarray(pic).save(rdir / "images" / f"{files[n]}.png")
+        _gif(frames, snaps, rdir / "images" / f"{files[n]}.gif", a.px, a.fps)
+    rp["refilmed"] = {"worlds": todo, "backend": a.backend, "time": time.strftime("%Y-%m-%d %H:%M")}
+    (rdir / "replay.json").write_text(json.dumps(rp, indent=1))
+    print(f"refilmed {len(todo)} worlds: {', '.join(todo)}", file=sys.stderr)
 
 
 def _binom_greater(k: int, n: int) -> float:
@@ -1682,9 +1711,9 @@ def main() -> None:
     for k in ("size", "warmup", "render", "gap", "sim_batch"):
         v.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
     r4 = sub.add_parser("v4rate", help="v4's blind session: build (Colab: films), rate (Mac page), report")
-    r4.add_argument("step", choices=["build", "rate", "report"])
+    r4.add_argument("step", choices=["build", "refilm", "rate", "report"])
     r4.add_argument("--out", required=True, help="this seed's Stage 1 folder (the session goes to <out>/rate-v4)")
-    r4.add_argument("--run", default=None, help="the base run (build only)")
+    r4.add_argument("--run", default=None, help="the base run (build and refilm)")
     r4.add_argument("--tag", default=V4_DIR)
     r4.add_argument("--backend", default="numpy")
     r4.add_argument("--seed", type=int, default=0)
@@ -1692,6 +1721,7 @@ def main() -> None:
     r4.add_argument("--px", type=int, default=280)
     r4.add_argument("--fps", type=int, default=15)
     r4.add_argument("--port", type=int, default=8773)
+    r4.add_argument("--force", action="store_true", help="rebuild an existing session (refused once ratings exist)")
     for k in ("size", "warmup", "render", "gap", "sim_batch"):
         r4.add_argument(f"--{k.replace('_', '-')}", type=int, default=None, help="override (offline dry runs only)")
     a = ap.parse_args()
