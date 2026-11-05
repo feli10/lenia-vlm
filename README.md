@@ -45,6 +45,7 @@ earlier runs from there; ask Felix for the folders you need.
 | `scripts/goal_session.py` | goal-steered sessions with library v3 goals (`data/goal_library_v3.json`), the expedition machinery |
 | `scripts/qd_compare.py` | compare archives with held-out Luna, then your blind "unusual?" ratings (`rate`) |
 | `scripts/stage1.py` | Stage 1 of the escalation loop: `triggers` (re-score the surprise archive, best per lineage), `expedition --arm L/N/NR/NS` (guarded expeditions, simulation cache, one review for NR/NS), `check` (held-out Luna, end vs start; gate 0c) |
+| `scripts/maptest.py` | map-prompt test: the base search with the user's aim as entry duel (`mace_qd.py run --like --aim`) vs "complex, life-like": map and texture `stats`, a blind matched-cell interest session (`build`, `rate`, `report`) |
 | `scripts/gates.py` | Stage 0 gates: 0e (several questions per request), 0d (verify) |
 | `scripts/clipbench.py` | CLIP targeted-search bench: which search settings steer toward a text target (inheritance vs regrowth, mutation strength, sep-CMA-ES, local control); no API calls |
 | `scripts/bakeoff.py` | gate 0a: which VLM names the triggers (`ping`, `names`, `verify`, `rate`, `report`) |

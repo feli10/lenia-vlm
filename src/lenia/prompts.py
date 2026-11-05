@@ -35,6 +35,22 @@ PROMPTS.setdefault(COMPLEXITY, {
 })
 
 
+# Aim-conditioned map entry (map-prompt test, 11-04; handoff "Stage 1 aim-conditioned goals", road map step 2): the
+# entry duel with its goal sentence replaced by the user's aim. Every other word is COMPLEXITY's except its typo "a few
+# time apart", which becomes "some time apart" (the surprise duel's wording; Felix 11-04: this prompt goes on into the
+# full run, so the typo isn't carried forward; COMPLEXITY keeps it, since its caches and runs depend on its text).
+# Registered per aim; the id hashes the full instruction text. Felix 11-03: "complex" may reward texture.
+def map_prompt(aim: str) -> str:
+    import hashlib
+    head = PROMPTS[COMPLEXITY]["instructions"].replace("taken a few time apart", "taken some time apart")
+    head = head[:head.index("The two images are {A} and {B}.") + len("The two images are {A} and {B}.")]
+    text = (head + " We are running an evolutionary process over many generations, aimed at this, in the user's words: "
+            f"\"{aim}\". Which world would you choose as the parent for the next generation?")
+    pid = "map_aim_" + hashlib.sha1(text.encode()).hexdigest()[:12]
+    PROMPTS.setdefault(pid, {"instructions": text, "first": PROMPTS[COMPLEXITY]["first"],
+                             "second": PROMPTS[COMPLEXITY]["second"]})
+    return pid
+
 # The surprise detector (validated: archive/scripts/surprise_check.py validate, runs/surprise-val).
 SURPRISE = "surprise_unusual_interesting"
 PROMPTS.setdefault(SURPRISE, {

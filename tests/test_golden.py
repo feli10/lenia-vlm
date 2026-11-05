@@ -26,7 +26,7 @@ for p in (ROOT / "src", ROOT / "scripts"):
         sys.path.insert(0, str(p))
 
 from lenia.judge import Judge, MultiQuery, Query, image_hash          # noqa: E402
-from lenia.prompts import get_prompt                       # noqa: E402
+from lenia.prompts import get_prompt, map_prompt, AIM_ALIFE  # noqa: E402
 
 from lenia import mace as M                                   # noqa: E402
 from lenia.mace import mutate, texture                        # noqa: E402
@@ -59,6 +59,7 @@ def compute() -> dict:
     out["gen/namer_aim_v2"] = _h(GEN[NAMER_AIM_V2])
     out["gen/namer_aim_v3"] = _h(GEN[NAMER_AIM])
     out["gen/review_aim"] = _h(GEN[REVIEW_AIM])
+    out["prompt/map_aim"] = _h(get_prompt(map_prompt(AIM_ALIFE)))
     out["menu/session_match"] = _h(SESSION_MATCH)                 # multiple-choice texts key the cache too
     out["menu/steer_groups"] = _h(STEER)
     out["menu/none"] = NONE
@@ -137,7 +138,8 @@ EXPECTED = {
     "gen/namer_aim": "5b9b6e0dca5eca58",                           # added 2026-11-04 (aim-conditioned namer)
     "gen/namer_aim_v2": "ebe4bf216e41b23c",                        # added 2026-11-04 (v2: the mass budget as a fact)
     "gen/namer_aim_v3": "33688547f4657c6a",                                     # added 2026-11-04 (v3: choose among distinctive features)
-    "gen/review_aim": "4cc08b71a42d5026"                           # added 2026-11-04 (aim-aware review, arm NS-aim)
+    "gen/review_aim": "4cc08b71a42d5026",                           # added 2026-11-04 (aim-aware review, arm NS-aim)
+    "prompt/map_aim": "bcffe677737ad1ef"                           # added 2026-11-04 (map-prompt test: the aim as entry duel)
 }   # recorded 2026-10-28 (cleanup); prompts, founders, mutate, simulate unchanged from before it; menus and interest added before the prompt move
 
 

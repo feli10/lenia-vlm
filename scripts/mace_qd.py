@@ -6,6 +6,8 @@
   python scripts/mace_qd.py map   --out RUNS/mace-qd                    # map.png + summary
   python scripts/mace_qd.py check --out RUNS/mace-qd                    # final elites vs elites at a snapshot
   python scripts/mace_qd.py rate  --out RUNS/mace-qd                    # your ratings of the check pairs (Mac)
+  python scripts/mace_qd.py run   --out RUNS/mace-qd5-sarch-s0-aim --like RUNS/mace-qd5-sarch-s0 --backend auto \\
+      --aim "more interesting as artificial life: richer structure or behaviour, more like something alive"   # map-prompt test
   python scripts/mace_qd.py run   --out /tmp/qd-dry --judge fake --embed-model fake --iterations 3 --batch 8 \\
       --init 8 --size 96 --warmup 200 --render 120 --gap 40             # offline dry run
 
@@ -74,6 +76,13 @@ from lenia.sample import sample
 from lenia.sim import Rule, with_flow
 
 PROMPT_ID = ME.PROMPT_ID
+
+
+def entry_prompt(a) -> str:
+    """The map's entry duel: COMPLEXITY, or with --aim the same prompt with the aim as its goal (lenia.prompts.map_prompt;
+    map-prompt test, 11-04). Runs from before --aim have no aim and keep COMPLEXITY."""
+    from lenia.prompts import map_prompt
+    return map_prompt(a.aim) if getattr(a, "aim", None) else PROMPT_ID
 BODY_EDGES = [2, 3, 5, 9, 17, 33]                     # v1 bins: 1 | 2 | 3-4 | 5-8 | 9-16 | 17-32 | 33+
 
 
@@ -85,7 +94,7 @@ def settings(st: dict) -> argparse.Namespace:
                               "parent_select": "uniform", "surprise_opponents": 6, "surprise_every": 20,
                               "surprise_mix": 0.5, "surprise_temp": 0.1, "surprise_ref": "all", "sarch": False,
                               "sarch_candidates": 3, "sarch_parents": 0.25, "sarch_threshold": 0.6, "sarch_max": 200,
-                              **st["args"]})
+                              "aim": None, "like": None, **st["args"]})
     if isinstance(a.axes, str):
         a.axes = a.axes.split(",")
     return a
@@ -231,7 +240,7 @@ def insert(st: dict, k: int, cands: list, evals: list, judge, out: Path, it: int
             duels += [(ck, n, evals[ns[0]]["pic"]) for n in ns[1:]]
     qs = []
     for ck, n, inc in duels:
-        qs += [Query(PROMPT_ID, evals[n]["pic"], inc), Query(PROMPT_ID, inc, evals[n]["pic"])]
+        qs += [Query(entry_prompt(a), evals[n]["pic"], inc), Query(entry_prompt(a), inc, evals[n]["pic"])]
     vs = judge.judge_many(qs, desc=f"it {it} {tag.rstrip('_') or 'map'}") if qs else []
     best = {}
     for d, (ck, n, _) in enumerate(duels):
@@ -346,6 +355,15 @@ def run(a) -> None:
     load_env(REPO_ROOT / ".env")
     judge = Judge(a.judge, {**cfg["judges"]["defaults"], **cfg["judges"][a.judge], "max_run_usd": a.max_usd},
                   out / "judge_cache.sqlite", yes=True)
+    like_form = None
+    if getattr(a, "like", None) and not (out / "state.json").exists():   # copy another run's settings (all but these)
+        base = json.loads((Path(a.like) / "state.json").read_text())
+        own = ("out", "backend", "judge", "config", "sim_batch", "max_usd", "aim", "like", "cmd")
+        for k, v in base["args"].items():
+            if k not in own:
+                setattr(a, k, v)
+        like_form = base.get("form")         # the same form-axis fit, so a cell means the same thing in both maps
+        print(f"settings and form fit copied from {a.like}", file=sys.stderr)
     if (out / "state.json").exists():
         st = json.loads((out / "state.json").read_text())
         keep = ("iterations", "backend", "judge", "out", "config", "sim_batch", "max_usd")
@@ -359,7 +377,7 @@ def run(a) -> None:
         a = settings(st)
         print(f"resuming at iteration {st['it']} ({sum(len(m) for m in islands_of(st))} cells filled)", file=sys.stderr)
     else:
-        st = {"it": 0, "args": {**vars(a), "axes": a.axes}, "prompt": ME.PROMPTS[PROMPT_ID], "progress": []}
+        st = {"it": 0, "args": {**vars(a), "axes": a.axes}, "prompt": ME.PROMPTS[entry_prompt(a)], "progress": []}
         if a.islands > 1:
             st["islands"] = [{} for _ in range(a.islands)]
         else:
@@ -411,7 +429,7 @@ def run(a) -> None:
         flat = [c for g in groups for c in g]
         evals = evaluate([c[0] for c in flat], a)
         if it == 0 and "form" in a.axes:
-            st["form"] = fit_form(evals, a)
+            st["form"] = like_form or fit_form(evals, a)
         add_form(evals, st)
         res = Counter()
         pos = 0
@@ -569,7 +587,8 @@ def check(a) -> None:
     res = {}
     for jn in a.judges.split(","):
         judge = Judge(jn, {**cfg["judges"]["defaults"], **cfg["judges"][jn]}, cdir / "judge_cache.sqlite", yes=True)
-        qs = [q for x, y in pairs for q in (Query(PROMPT_ID, pics[x], pics[y]), Query(PROMPT_ID, pics[y], pics[x]))]
+        pid = entry_prompt(settings(st))
+        qs = [q for x, y in pairs for q in (Query(pid, pics[x], pics[y]), Query(pid, pics[y], pics[x]))]
         vs = judge.judge_many(qs, desc=f"check {jn}") if qs else []
         res[jn] = [None if not (vs[2 * k].ok and vs[2 * k + 1].ok) else 0.5 * (vs[2 * k].p_first + 1 - vs[2 * k + 1].p_first)
                    for k in range(len(pairs))]
@@ -636,6 +655,10 @@ def main() -> None:
     r.add_argument("--sarch-threshold", type=float, default=0.6, help="initial surprise score needed to join (adapts)")
     r.add_argument("--sarch-max", type=int, default=200)
     r.add_argument("--seed", type=int, default=0)
+    r.add_argument("--aim", default=None, help="the user's aim as the entry duel's goal (lenia.prompts.map_prompt) "
+                   "instead of COMPLEXITY's \"complex, life-like\" (map-prompt test, 11-04)")
+    r.add_argument("--like", default=None, help="copy every setting and the form-axis fit from this run's state.json "
+                   "(all but --out, --backend, --judge, --config, --sim-batch, --max-usd, --aim): a one-change comparison")
     r.add_argument("--max-usd", type=float, default=6.0, help="hard cap on this run's judge spend, across resumes "
                    "(a 100-iteration --sarch run costs ~$3); raise it and re-run to continue")
     m = sub.add_parser("map")
