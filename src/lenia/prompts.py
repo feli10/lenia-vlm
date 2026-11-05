@@ -350,6 +350,23 @@ GEN.setdefault(CAPTION, {
     "fields": ["end", "start"]})
 
 
+# Gallery pick (full run, 11-05; project doc "Handoff - full run build (seed 1)"): the last step of a run. Scores pick the
+# shortlist (Bradley-Terry ratings from every aim entry duel, a Swiss tournament among the cell champions, then at most
+# two per lineage and one per cell); the generative VLM chooses the final set from it, judging the set as a whole. The
+# shortlist is shown in random order. In the spirit of Sam's Picbreeder score tracking; the VLM choosing a set is ours.
+GALLERY = "gallery_pick_v1"
+GEN.setdefault(GALLERY, {
+    "system": _GEN_SYSTEM + " Here you choose the gallery of a finished run: the worlds shown to the user as its result.",
+    "user": ("The aim of this experiment, in the user's words: \"{aim}\"\n\n"
+             "Images 1 to {n} are the run's best worlds by the cheap judge's scores, at most two from any one family of "
+             "descendants, in no particular order. " + _FRAMES + "\n\n"
+             "Choose the {k} worlds that together make the best gallery for the aim: each should be worth showing as a "
+             "result for the aim on its own, and the set should be as varied as possible, so that no two show essentially "
+             "the same thing. Judge by the structure and behaviour the worlds show, not by their colours.\n\n"
+             "Return {\"picks\": [the {k} image numbers, best first], \"why\": one short reason per pick, in the same "
+             "order, separated by semicolons}."),
+    "fields": ["why"]})                                   # "picks" (a list) passes through describe.parse as an extra key
+
 # ---------- lookup ----------
 
 def get_prompt(prompt_id: str) -> dict[str, str]:

@@ -51,6 +51,9 @@ inherited, so elite and challenger are always the same age.
   validated surprise duel as the novelty measure, including their adaptive threshold: +0.02 when more than
   2 enter in one iteration, -0.02 after 5 iterations with none, within [0.5, 0.9], from --sarch-threshold.
 Saves state after every iteration (resumes) and a snapshot of the maps every --snapshot-every iterations.
+Full run (11-05, scripts/fullrun.py): --surprise-px 484 shrinks the surprise duel's pictures (gate 0f); --ledger logs
+every judged world with its rule and its duel's opponent (ledger.jsonl), for the gallery's Bradley-Terry ratings.
+Both are off by default, so earlier runs and commands are unchanged.
 """
 from __future__ import annotations
 
@@ -94,7 +97,7 @@ def settings(st: dict) -> argparse.Namespace:
                               "parent_select": "uniform", "surprise_opponents": 6, "surprise_every": 20,
                               "surprise_mix": 0.5, "surprise_temp": 0.1, "surprise_ref": "all", "sarch": False,
                               "sarch_candidates": 3, "sarch_parents": 0.25, "sarch_threshold": 0.6, "sarch_max": 200,
-                              "aim": None, "like": None, **st["args"]})
+                              "aim": None, "like": None, "surprise_px": 0, "ledger": False, **st["args"]})
     if isinstance(a.axes, str):
         a.axes = a.axes.split(",")
     return a
@@ -210,16 +213,34 @@ def save_state(out: Path, st: dict) -> None:
     tmp.replace(out / "state.json")
 
 
-def insert(st: dict, k: int, cands: list, evals: list, judge, out: Path, it: int, log, a) -> dict:
-    """Into island k. cands: [(rule, parent label or None, root seed)]. Returns counts."""
+def insert(st: dict, k: int, cands: list, evals: list, judge, out: Path, it: int, log, a, pids: list | None = None,
+           ledger: list | None = None) -> dict:
+    """Into island k. cands: [(rule, parent label or None, root seed)]. Returns counts. With ledger (a list), one row
+    per candidate is appended to it (--ledger): its id (its picture's name without .png, saved or not), rule, the duel's
+    opponent id and P, and whether it was placed; pids: the parents' ids, parallel to cands."""
     arch = islands_of(st)[k]
     imgdir = out / "img"
     tag = f"I{k}_" if a.islands > 1 else ""
     by_cell: dict = {}
     n_tex = 0
 
-    def row(n, ck, kind, p, acc):
+    lrows = {}
+
+    def wid(n):                              # the name place() gives the picture, without .png
+        mig = "m" if str(cands[n][1] or "").startswith("migrant") else ""
+        return f"it{it:04d}_{tag}{mig}{n:03d}"
+
+    def row(n, ck, kind, p, acc, opp=None):
         e = evals[n]
+        if ledger is not None:
+            rule, parent, root = cands[n]
+            lrows[n] = {"id": wid(n), "source": "migrant" if str(parent or "").startswith("migrant") else "map", "it": it,
+                        "island": k, "n": n, "kind": kind, "cell": ck, "opponent": opp,
+                        "p": None if p is None else round(p, 4), "accepted": int(acc), "parent": parent,
+                        "parent_id": pids[n] if pids else None, "root": root, "rule": rule.to_dict(),
+                        "bodies": e["bodies"], "motion": round(e["motion"], 4), "texture": round(e["texture"], 4),
+                        "coverage": round(e.get("coverage", float("nan")), 4),
+                        **({"form": round(e["form"], 4)} if "form" in e else {})}
         log.writerow([it, k, n, cands[n][1] or "", ck, kind, "" if p is None else round(p, 4), int(acc), e["bodies"],
                       round(e["motion"], 4), round(e.get("form", float("nan")), 4), round(e["texture"], 4),
                       round(cands[n][0].beta, 3), cands[n][2]])
@@ -230,14 +251,16 @@ def insert(st: dict, k: int, cands: list, evals: list, judge, out: Path, it: int
             row(n, "", "texture", None, 0)
             continue
         by_cell.setdefault(cell_of(e, a, st), []).append(n)
-    duels, first_new = [], {}
+    duels, first_new, opps = [], {}, []
     for ck, ns in by_cell.items():
         if ck in arch:
             inc = np.asarray(Image.open(imgdir / arch[ck]["image"]).convert("RGB"))
             duels += [(ck, n, inc) for n in ns]
+            opps += [Path(arch[ck]["image"]).stem] * len(ns)
         else:
             first_new[ck] = ns[0]
             duels += [(ck, n, evals[ns[0]]["pic"]) for n in ns[1:]]
+            opps += [wid(ns[0])] * (len(ns) - 1)
     qs = []
     for ck, n, inc in duels:
         qs += [Query(entry_prompt(a), evals[n]["pic"], inc), Query(entry_prompt(a), inc, evals[n]["pic"])]
@@ -249,7 +272,7 @@ def insert(st: dict, k: int, cands: list, evals: list, judge, out: Path, it: int
         acc = p is not None and p >= a.threshold
         if acc and p > best.get(ck, (0.0, None))[0]:
             best[ck] = (p, n)
-        row(n, ck, "duel" if ck in arch else "duel_new", p, acc)
+        row(n, ck, "duel" if ck in arch else "duel_new", p, acc, opps[d])
 
     def place(ck, n, p):
         rule, parent, root = cands[n]
@@ -281,6 +304,8 @@ def insert(st: dict, k: int, cands: list, evals: list, judge, out: Path, it: int
             new_cells += 1
         place(ck, n, p)
     outside = [n for ns in by_cell.values() for n in ns if n not in placed]
+    if ledger is not None:
+        ledger += [{**r, "placed": int(n in placed)} for n, r in sorted(lrows.items())]
     return {"texture_fail": n_tex, "new": new_cells, "replaced": replaced, "duels": len(duels), "outside": outside}
 
 
@@ -288,9 +313,23 @@ def lineages(st: dict) -> int:
     return len({e.get("root") for arch in islands_of(st) for e in arch.values()})
 
 
+def small(pic: np.ndarray, px: int) -> np.ndarray:
+    """The picture shrunk to px per side with a box filter (--surprise-px): gate 0f (scripts/res_check.py) validated 484 px
+    for the surprise duel only; Jev bills by input size, so it costs about 44% less per duel."""
+    return pic if not px or px >= pic.shape[0] else np.asarray(Image.fromarray(pic).resize((px, px), Image.BOX))
+
+
+def write_ledger(out: Path, rows: list) -> None:
+    """--ledger: one JSON line per judged world and per surprise judgment (ledger.jsonl). Written before the state is
+    saved, so a crash mid-iteration can repeat an iteration's rows on resume: readers keep the last row per (id, kind)."""
+    if rows:
+        with open(out / "ledger.jsonl", "a") as fh:
+            fh.writelines(json.dumps(r) + "\n" for r in rows)
+
+
 # ---------- surprise archive (v4) ----------
 
-def sarch_step(st: dict, outside: list, judge, out: Path, rng, a, it: int, slog) -> dict:
+def sarch_step(st: dict, outside: list, judge, out: Path, rng, a, it: int, slog, ledger: list | None = None) -> dict:
     """outside: [(island, cand, eval)] challengers the map rejected this iteration. Judges up to
     --sarch-candidates per island with the surprise duel against random members of map + surprise archive and
     adds those at or above the threshold. Returns counts."""
@@ -304,17 +343,21 @@ def sarch_step(st: dict, outside: list, judge, out: Path, rng, a, it: int, slog)
     if not pick or len(ref) < 2:
         return {}
     cache = {}
+    sp = getattr(a, "surprise_px", 0) or 0
 
     def pic(name):
         if name not in cache:
-            cache[name] = np.asarray(Image.open(out / "img" / name).convert("RGB"))
+            cache[name] = small(np.asarray(Image.open(out / "img" / name).convert("RGB")), sp)
         return cache[name]
 
-    qs = []
+    qs, opp_ids = [], []
     for k, c, ev in pick:
-        for j in rng.choice(len(ref), min(a.surprise_opponents, len(ref)), replace=False):
+        mine = small(ev["pic"], sp)
+        js = rng.choice(len(ref), min(a.surprise_opponents, len(ref)), replace=False)
+        opp_ids.append([Path(ref[int(j)]).stem for j in js])
+        for j in js:
             o = pic(ref[int(j)])
-            qs += [Query(SURPRISE, ev["pic"], o), Query(SURPRISE, o, ev["pic"])]
+            qs += [Query(SURPRISE, mine, o), Query(SURPRISE, o, mine)]
     vs = judge.judge_many(qs, desc=f"it {it} surprise archive")
     per = len(qs) // len(pick)
     thr = st.get("sarch_thr", a.sarch_threshold)
@@ -327,6 +370,10 @@ def sarch_step(st: dict, outside: list, judge, out: Path, rng, a, it: int, slog)
         ok = sc is not None and sc >= thr
         slog.writerow([it, k, n, parent or "", "" if sc is None else round(sc, 4), round(thr, 3), int(ok), ev["bodies"],
                        round(ev["motion"], 4), root])
+        if ledger is not None:
+            ledger.append({"id": f"it{it:04d}_{tag(k)}{n:03d}", "kind": "surprise", "it": it, "island": k,
+                           "score": None if sc is None else round(sc, 4), "threshold": round(thr, 3), "added": int(ok),
+                           "opponents": opp_ids[i], "px": sp or ev["pic"].shape[0]})
         if ok:
             name = f"it{it:04d}_{tag(k)}{n:03d}.png"
             if not (out / "img" / name).exists():
@@ -403,11 +450,12 @@ def run(a) -> None:
                      sample("multichannel", a.init, seed=a.init_seed, R=a.R, channels=3, self_k=1, cross_k=1)]
             seeds_ = found + extra
             groups = [[(r, None, s) for s, r in enumerate(seeds_) if s % K == k] for k in range(K)]
+            pid_groups = [[None] * len(g) for g in groups]
         else:
-            groups = []
+            groups, pid_groups = [], []
             for k, arch in enumerate(islands_of(st)):
                 keys = sorted(arch)
-                g = []
+                g, pg = [], []
                 sk = [j for j, e in enumerate(st.get("sarch", [])) if e["island"] == k] if a.sarch else []
                 for _ in range(a.batch // K if keys else 0):
                     if sk and rng.random() < a.sarch_parents:          # a stepping stone from the surprise archive
@@ -418,6 +466,7 @@ def run(a) -> None:
                         m.flow = "mace"
                         m.beta = float(np.clip(par.beta * np.exp(rng.normal(0, 0.1)), 0.5, 4.0))
                         g.append((m, f"I{k}:S:{se['image']}", se.get("root")))
+                        pg.append(Path(se["image"]).stem)
                         continue
                     pk = keys[int(rng.integers(len(keys)))]
                     par = Rule.from_dict(arch[pk]["rule"])
@@ -425,7 +474,9 @@ def run(a) -> None:
                     m.flow = "mace"
                     m.beta = float(np.clip(par.beta * np.exp(rng.normal(0, 0.1)), 0.5, 4.0))
                     g.append((m, f"I{k}:{pk}" if K > 1 else pk, arch[pk].get("root")))
+                    pg.append(Path(arch[pk]["image"]).stem)
                 groups.append(g)
+                pid_groups.append(pg)
         flat = [c for g in groups for c in g]
         evals = evaluate([c[0] for c in flat], a)
         if it == 0 and "form" in a.axes:
@@ -434,8 +485,9 @@ def run(a) -> None:
         res = Counter()
         pos = 0
         outside = []
+        lrows = [] if a.ledger else None
         for k, g in enumerate(groups):
-            r = insert(st, k, g, evals[pos:pos + len(g)], judge, out, it, log, a)
+            r = insert(st, k, g, evals[pos:pos + len(g)], judge, out, it, log, a, pids=pid_groups[k], ledger=lrows)
             outside += [(k, (*g[n], n), evals[pos + n]) for n in r.pop("outside")]
             res.update(r)
             pos += len(g)
@@ -451,10 +503,11 @@ def run(a) -> None:
                 ev = {"pic": np.asarray(Image.open(out / "img" / e["image"]).convert("RGB")), "bodies": e["bodies"],
                       "motion": e["motion"], "texture": e["texture"], "coverage": e["coverage"],
                       **({"form": e["form"]} if "form" in e else {})}
-                r = insert(st, k, [(Rule.from_dict(e["rule"]), f"migrant I{s}:{ck}", e.get("root"))], [ev], judge, out, it, log, a)
+                r = insert(st, k, [(Rule.from_dict(e["rule"]), f"migrant I{s}:{ck}", e.get("root"))], [ev], judge, out, it, log, a,
+                           pids=[Path(e["image"]).stem], ledger=lrows)
                 res["migrated"] += r["new"] + r["replaced"]
         if a.sarch and it > 0:
-            res.update(sarch_step(st, outside, judge, out, np.random.default_rng([a.seed, it, 11]), a, it, slog))
+            res.update(sarch_step(st, outside, judge, out, np.random.default_rng([a.seed, it, 11]), a, it, slog, lrows))
             sfh.flush()
         fh.flush()
         filled = sum(len(m) for m in islands_of(st))
@@ -463,6 +516,8 @@ def run(a) -> None:
             snap = st["islands"] if K > 1 else st["archive"]
             (out / "snapshots" / f"archive_it{it:04d}.json").write_text(json.dumps(snap))
         st["it"] = it + 1
+        if lrows:
+            write_ledger(out, lrows)
         save_state(out, st)
         print(f"it {it}: {filled} cells filled, {lineages(st)} seed lineages, {res['new']} new, {res['replaced']} replaced, "
               f"{res['duels']} duels, {res['texture_fail']} grid-noise"
@@ -655,6 +710,10 @@ def main() -> None:
     r.add_argument("--sarch-threshold", type=float, default=0.6, help="initial surprise score needed to join (adapts)")
     r.add_argument("--sarch-max", type=int, default=200)
     r.add_argument("--seed", type=int, default=0)
+    r.add_argument("--surprise-px", type=int, default=0, help="shrink the surprise duel's pictures to this many px per side "
+                   "(box filter; 484 validated in gate 0f; 0 = full size, as every run before seed 1's full run)")
+    r.add_argument("--ledger", action="store_true", help="write ledger.jsonl: every judged world (id, rule, descriptors, "
+                   "the duel's opponent and P, placed or not) and every surprise judgment (full run, 11-05)")
     r.add_argument("--aim", default=None, help="the user's aim as the entry duel's goal (lenia.prompts.map_prompt) "
                    "instead of COMPLEXITY's \"complex, life-like\" (map-prompt test, 11-04)")
     r.add_argument("--like", default=None, help="copy every setting and the form-axis fit from this run's state.json "
