@@ -46,6 +46,8 @@ earlier runs from there; ask Felix for the folders you need.
 | `scripts/qd_compare.py` | compare archives with held-out Luna, then your blind "unusual?" ratings (`rate`) |
 | `scripts/stage1.py` | Stage 1 of the escalation loop: `triggers` (re-score the surprise archive, best per lineage), `expedition --arm L/N/NR/NS` (guarded expeditions, simulation cache, one review for NR/NS), `check` (held-out Luna, end vs start; gate 0c) |
 | `scripts/fullrun.py` | the full open-ended run (seed 1): rounds of map search, triggers (map + archive, memory in the panel), aim goals, NS-aim expeditions, feedback of their ends into the map; the ledger; the gallery (Bradley-Terry, Swiss tournament, diversified shortlist, Gemini's pick); the map-only baseline forks after round 1 |
+| `scripts/fullcheck.py` | checks a full run from what it stored, finished or not: per-round table, ends vs starts on the aim duel with controls, ends on neutral ground (Swiss + Bradley-Terry), map, sheets and GIFs |
+| `scripts/fullrate.py` | the full run's blind rating session (goal steering with controls, refinement sources, gallery vs random) and the judge test: Jev and Gemini (stills or film strips) on Felix's pairs, agreement with him |
 | `scripts/maptest.py` | map-prompt test: the base search with the user's aim as entry duel (`mace_qd.py run --like --aim`) vs "complex, life-like": map and texture `stats`, a blind matched-cell interest session (`build`, `rate`, `report`) |
 | `scripts/gates.py` | Stage 0 gates: 0e (several questions per request), 0d (verify) |
 | `scripts/clipbench.py` | CLIP targeted-search bench: which search settings steer toward a text target (inheritance vs regrowth, mutation strength, sep-CMA-ES, local control); no API calls |

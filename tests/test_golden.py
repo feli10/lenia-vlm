@@ -32,7 +32,7 @@ from lenia import mace as M                                   # noqa: E402
 from lenia.mace import mutate, texture                        # noqa: E402
 from lenia.prompts import (INTEREST, NONE, SESSION_MATCH, STEER, SURPRISE,  # noqa: E402
                            attain_prompt, steer_prompt, verify_prompt, GEN, NAMER, REVIEW, REVIEW_R, REVIEW_S, GOAL_JUDGE,
-                           CAPTION, NAMER_AIM, NAMER_AIM_V1, NAMER_AIM_V2, REVIEW_AIM, GALLERY)
+                           CAPTION, NAMER_AIM, NAMER_AIM_V1, NAMER_AIM_V2, REVIEW_AIM, GALLERY, PAIR_JUDGE, PAIR_LAYOUT)
 
 GOAL = {"id": "golden", "sees": "a round body with a dark core", "push": "make the core split in two"}
 
@@ -61,6 +61,7 @@ def compute() -> dict:
     out["gen/review_aim"] = _h(GEN[REVIEW_AIM])
     out["prompt/map_aim"] = _h(get_prompt(map_prompt(AIM_ALIFE)))
     out["gen/gallery"] = _h(GEN[GALLERY])
+    out["gen/pair_judge"] = _h([GEN[PAIR_JUDGE], PAIR_LAYOUT])
     out["menu/session_match"] = _h(SESSION_MATCH)                 # multiple-choice texts key the cache too
     out["menu/steer_groups"] = _h(STEER)
     out["menu/none"] = NONE
@@ -141,7 +142,8 @@ EXPECTED = {
     "gen/namer_aim_v3": "33688547f4657c6a",                                     # added 2026-11-04 (v3: choose among distinctive features)
     "gen/review_aim": "4cc08b71a42d5026",                           # added 2026-11-04 (aim-aware review, arm NS-aim)
     "prompt/map_aim": "bcffe677737ad1ef",                          # added 2026-11-04 (map-prompt test: the aim as entry duel)
-    "gen/gallery": "07ced74b42c90cc6"                              # added 2026-11-05 (full run: the gallery's final pick)
+    "gen/gallery": "07ced74b42c90cc6",                             # added 2026-11-05 (full run: the gallery's final pick)
+    "gen/pair_judge": "534bf3e5ae85743d"                           # added 2026-11-06 (judge test: Gemini on Felix's pairs)
 }   # recorded 2026-10-28 (cleanup); prompts, founders, mutate, simulate unchanged from before it; menus and interest added before the prompt move
 
 

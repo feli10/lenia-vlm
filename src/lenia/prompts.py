@@ -367,6 +367,23 @@ GEN.setdefault(GALLERY, {
              "order, separated by semicolons}."),
     "fields": ["why"]})                                   # "picks" (a list) passes through describe.parse as an extra key
 
+# Pairwise judge for the generative VLM (11-06; project doc "Full run (seed 1) - diagnosis"): the judge test asks Gemini
+# the same pairs Felix rated blind, beside Jev, to see which agrees with him. One prompt for both questions and both
+# inputs; the fields carry the layout (the four stills Jev sees, or eight frames of the film Felix sees), the question
+# and, for goal pairs, the goal. Ours. (GOAL_JUDGE, goal_judge_v1, is the 10-29 goal-only version; kept for its cache.)
+PAIR_JUDGE = "pair_judge_v1"
+GEN.setdefault(PAIR_JUDGE, {
+    "system": _GEN_SYSTEM + " Here you compare two worlds and answer one question about them.",
+    "user": ("Image 1 and Image 2 are two worlds. {layout}\n\n{context}Question: {question}\n\n"
+             "Answer from what the images show, not from what such worlds usually do. "
+             "Return {\"choice\": \"1\" or \"2\", \"why\": one short sentence}."),
+    "fields": ["choice", "why"]})
+PAIR_LAYOUT = {
+    "stills": _FRAMES,
+    "strip": ("Each image shows one whole world as eight frames of a film, evenly spaced over the same stretch of time, "
+              "in reading order (two rows of four), so you can see how it moves and changes."),
+}
+
 # ---------- lookup ----------
 
 def get_prompt(prompt_id: str) -> dict[str, str]:
