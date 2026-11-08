@@ -384,6 +384,43 @@ PAIR_LAYOUT = {
               "in reading order (two rows of four), so you can see how it moves and changes."),
 }
 
+
+# ---------- motion benchmark, Stage A (11-07; project doc "Jev motion benchmark - spec") ----------
+# Can Jev see how much a world changes, and does the picture fix it? One question for every configuration; the
+# description of how to read the picture goes with the picture. R0 = the pipeline's grid and its own preamble (WORLD);
+# the other configurations describe the time order and interval. Ours.
+BENCH_FORMATS = ("grid", "line", "ghosts", "labels")
+_ORDER = "The world wraps around at its edges. Compare the snapshots to see how the world changes over time"
+BENCH_LAYOUT = {
+    "R0": ("four snapshots taken some time apart, long enough to show movement and change, in reading order "
+           "(top-left, top-right, bottom-left, bottom-right)"),
+    "grid": ("four snapshots of the same world in time order, 400 simulation steps apart: top-left is the earliest, then "
+             "top-right, then bottom-left, and bottom-right is the latest. " + _ORDER),
+    "line": ("four snapshots of the same world in time order, 400 simulation steps apart, from the earliest on the left "
+             "to the latest on the right. " + _ORDER),
+    "ghosts": ("seven snapshots of the same world overlaid in one picture, 200 simulation steps apart: the latest is "
+               "drawn brightest and each earlier one fainter, so faint trails show where things were. The world wraps "
+               "around at its edges. Compare the bright and faint copies to see how the world changes over time"),
+    "labels": ("four snapshots of the same world in time order, 400 simulation steps apart, from the earliest on the "
+               "left to the latest on the right; each is labelled with its time step and drawn over the same coordinate "
+               "grid, so you can compare positions. " + _ORDER),
+}
+assert ("as " + BENCH_LAYOUT["R0"] + ";") in WORLD
+BENCH_QUESTION = ("Which world changes more over time: more of it moves, reshapes or rearranges from one snapshot to "
+                  "the next?")
+
+
+def bench_prompt(layout: str) -> str:
+    """layout: R0 or a format. WORLD with its layout clause swapped, then the one question."""
+    import hashlib
+    text = (WORLD.replace(BENCH_LAYOUT["R0"], BENCH_LAYOUT[layout]).replace("{N}", "two worlds") +
+            " The two images are {A} and {B}. " + BENCH_QUESTION)
+    pid = "bench_a_" + hashlib.sha1(text.encode()).hexdigest()[:12]
+    PROMPTS.setdefault(pid, {"instructions": text, "first": "The world in {A} changes more.",
+                             "second": "The world in {B} changes more."})
+    return pid
+
+
 # ---------- lookup ----------
 
 def get_prompt(prompt_id: str) -> dict[str, str]:
