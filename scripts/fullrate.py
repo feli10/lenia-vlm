@@ -262,6 +262,10 @@ def judges(a) -> None:
             ps = S1.duels(jev, p_id, [(t["a"], t["b"]) for t in tt], pics, name)
             for t, p in zip(tt, ps):
                 res[t["id"]][name] = None if p is None else round(p, 4)
+    if a.no_vlm:                                        # 11-10: Jev only (Gemini can be slow under rate limits; run it later)
+        (R / "judges.json").write_text(json.dumps({"judge": jev.model, "vlm": None, "results": res}, indent=1))
+        print(f"judges (Jev only): ${jev.cache.total_cost():.3f}; {R / 'judges.json'}", file=sys.stderr)
+        return report(a)
     d = Describer(a.vlm, cfg["vlms"][a.vlm], R / "describe_cache.sqlite", max_usd=a.max_vlm_usd)
     strips = {w: strip(R / "images" / f"{h}.gif") for w, h in files.items()} if "strip" in a.inputs else {}
     for inp in a.inputs.split(","):
@@ -386,6 +390,7 @@ def main() -> None:
     j.add_argument("--max-usd", type=float, default=0.2)
     j.add_argument("--max-vlm-usd", type=float, default=5.0)
     j.add_argument("--before-rating", action="store_true", help="dry runs only")
+    j.add_argument("--no-vlm", action="store_true", help="Jev only: skip Gemini (run judges again later to add it)")
     a = ap.parse_args()
     {"build": build, "rate": rate, "judges": judges, "report": report}[a.cmd](a)
 

@@ -404,6 +404,8 @@ BENCH_LAYOUT = {
     "labels": ("four snapshots of the same world in time order, 400 simulation steps apart, from the earliest on the "
                "left to the latest on the right; each is labelled with its time step and drawn over the same coordinate "
                "grid, so you can compare positions. " + _ORDER),
+    "grid9": ("nine snapshots of the same world in time order, 150 simulation steps apart, in reading order (three rows "
+              "of three): top-left is the earliest and bottom-right is the latest. " + _ORDER),
 }
 assert ("as " + BENCH_LAYOUT["R0"] + ";") in WORLD
 BENCH_QUESTION = ("Which world changes more over time: more of it moves, reshapes or rearranges from one snapshot to "
@@ -418,6 +420,34 @@ def bench_prompt(layout: str) -> str:
     pid = "bench_a_" + hashlib.sha1(text.encode()).hexdigest()[:12]
     PROMPTS.setdefault(pid, {"instructions": text, "first": "The world in {A} changes more.",
                              "second": "The world in {B} changes more."})
+    return pid
+
+
+
+# ---------- rating benchmark (11-10; project doc "Jev motion benchmark - spec", Stage B) ----------
+# Jev must make the calls Felix makes from films while seeing only stills. Two dimensions on his rated seed-1 pairs:
+# the picture (its layout clause in WORLD is swapped for the format's) and the question (the pipeline's own, or the
+# same with one sentence asking Jev to judge the worlds as films). R0 with the pipeline's question returns the
+# pipeline's own prompt id, so that cell reproduces seed 1 exactly. Ours.
+BENCH_MOTION = ("Judge each world as it would look as a film playing from its earliest snapshot to its latest: how it "
+                "moves, which parts move and in which direction, and how it changes over time, not only how any single "
+                "snapshot looks.")
+
+
+def rate_prompt(fmt: str, base_pid: str, motion: bool = False) -> str:
+    """base_pid: INTEREST or an attain_prompt id. fmt: a BENCH_LAYOUT key (R0 = the pipeline's grid)."""
+    import hashlib
+    p = PROMPTS[base_pid]
+    text = p["instructions"]
+    assert BENCH_LAYOUT["R0"] in text, base_pid
+    text = text.replace(BENCH_LAYOUT["R0"], BENCH_LAYOUT[fmt])
+    if motion:
+        k = text.index("The two images are {A} and {B}.") + len("The two images are {A} and {B}.")
+        text = text[:k] + " " + BENCH_MOTION + text[k:]
+    if text == p["instructions"]:
+        return base_pid
+    pid = "rate_" + hashlib.sha1((text + p["first"] + p["second"]).encode()).hexdigest()[:12]
+    PROMPTS.setdefault(pid, {"instructions": text, "first": p["first"], "second": p["second"]})
     return pid
 
 

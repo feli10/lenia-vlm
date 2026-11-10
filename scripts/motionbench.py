@@ -21,8 +21,10 @@ Details:
 - Truth: change = mean |snapshot(t+1) - snapshot(t)| / mass over the four snapshots every picture shows (the map's
   motion descriptor uses first vs last; this uses each step). Felix's 10-pair check confirms it matches what he sees.
 - Change pairs: easy (ratio >= --easy) from random elites, close (--close-lo..--close-hi) from comparisons the
-  pipeline made (duels, siblings); random pairs fill shortfalls. Frozen pairs: a world that visibly changes (change >=
-  the pool median) vs itself with its last snapshot repeated. World-disjoint dev / test; at most 2 items per world.
+  pipeline made (duels, siblings); random pairs fill shortfalls. Close was 1.2-1.5 until 11-10: in Felix's first truth
+  check (check-v1) he agreed on 1, disagreed on 2 and couldn't tell 2 of those, so that band is below what a person
+  sees; easy pairs 5/5. Frozen pairs: a world that visibly changes (change >= the pool median) vs itself with its last
+  snapshot repeated. World-disjoint dev / test; at most 2 items per world.
 - Configurations: R0 (the pipeline's grid and preamble) and grid / line / ghosts / labels with the time order
   described. One question for all (lenia.prompts.bench_prompt), first / second, both orders.
 From papers: none (frozen copies are a standard ablation). Ours: the design.
@@ -600,8 +602,8 @@ def main() -> None:
         p = sub.choices[c]
         p.add_argument("--test-share", type=float, default=0.4)
         p.add_argument("--easy", type=float, default=2.0, help="change ratio for easy pairs")
-        p.add_argument("--close-lo", type=float, default=1.2)
-        p.add_argument("--close-hi", type=float, default=1.5)
+        p.add_argument("--close-lo", type=float, default=1.5)
+        p.add_argument("--close-hi", type=float, default=2.0)
         p.add_argument("--n-dev", type=three, default=[40, 40, 25], help="easy,close,frozen")
         p.add_argument("--n-test", type=three, default=[25, 25, 15], help="easy,close,frozen")
         p.add_argument("--n-random", type=int, default=8000, help="random pairs per split (fills shortfalls)")
