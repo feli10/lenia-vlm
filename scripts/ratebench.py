@@ -8,6 +8,7 @@ clearly beats R0 is confirmed later on a fresh set of his ratings, since choosin
   python scripts/ratebench.py build --out RUNS/rate-bench --source RUNS/full-s1 --backend auto   # Colab GPU (cell 10)
   PYTHONPATH=src:scripts python3 scripts/ratebench.py judge --out RUNS/rate-bench                         # ~$0.15
   PYTHONPATH=src:scripts python3 scripts/ratebench.py report --out RUNS/rate-bench                        # no calls
+  PYTHONPATH=src:scripts python3 scripts/ratebench.py texture --out RUNS/rate-bench                       # ~$0.12 (11-12)
   Offline dry run: build ... --limit 6, then judge --judge fake (device shell: --out in the VM's $HOME).
 
 The two dimensions (every combination, both orders):
@@ -257,10 +258,101 @@ def report(a) -> None:
     print("\n".join(L))
 
 
+TEX_PICS = ["R0", "ghosts"]
+
+
+def texture(a) -> None:
+    """Felix's texture ideas (11-12), interest pairs only: tell Jev to disregard texture (his wording) or speckle (the
+    review's reading), or ask Jev which world is more textured / speckled and subtract that answer from the interest
+    answer, with the weight chosen by leave-one-out on these same pairs."""
+    out = Path(a.out)
+    D = json.loads((out / "items.json").read_text())
+    items = [t for t in D["items"] if t["question"] == "interest"]
+    s = D["meta"]["settings"]
+    tf = out / "texture.json"
+    if a.judge_calls:
+        cfg = load(a.config)
+        load_env(REPO_ROOT / ".env")
+        J = Judge(a.judge, {**cfg["judges"]["defaults"], **cfg["judges"][a.judge], "max_run_usd": a.max_usd},
+                  out / f"judge_cache_{a.judge}.sqlite", yes=True)
+        ws = sorted({w for t in items for w in (t["a"], t["b"])})
+        cols = {w: np.load(out / "frames" / f"{MB.fid(w)}.npz")["f"] for w in ws}
+        qs_all = {**{f"interest+{k}": v for k, v in PR.TEX_INTEREST.items()}, **{f"ask:{k}": v for k, v in PR.TEX_ASK.items()}}
+        res = {}
+        for fmt in TEX_PICS:
+            P = {w: picture(cols[w], fmt, s) for w in ws}
+            for name, base in qs_all.items():
+                pid = PR.rate_prompt(fmt, base)
+                qs = [q for t in items for q in (Query(pid, P[t["a"]], P[t["b"]]), Query(pid, P[t["b"]], P[t["a"]]))]
+                vs = J.judge_many(qs, desc=f"{fmt}/{name}")
+                res[f"{fmt}/{name}"] = {t["id"]: {"p1": x.p_first, "p2": y.p_first}
+                                        for t, x, y in zip(items, vs[::2], vs[1::2]) if x.ok and y.ok}
+        tf.write_text(json.dumps({"judge": J.model, "results": res}, indent=1))
+        print(f"spent ${J.cache.total_cost():.3f} in total (this benchmark's {a.judge} cache)", file=sys.stderr)
+    T = json.loads(tf.read_text())["results"]
+    R = json.loads((out / "results.json").read_text())["results"]
+
+    def pa(r):                                               # both-orders P(world a)
+        return 0.5 * (r["p1"] + 1 - r["p2"])
+
+    def lg(p):
+        p = min(max(p, 1e-3), 1 - 1e-3)
+        return math.log(p / (1 - p))
+
+    def acc(score):                                          # score > 0: a; Felix's side; ties half
+        v = [1.0 if (sc > 0) == (t["felix"] == t["a"]) and sc != 0 else 0.5 if sc == 0 else 0.0
+             for t, sc in ((t, score(t)) for t in items) if sc is not None]
+        return sum(v) / len(v), len(v)
+
+    def get(tab, k, t):
+        r = tab.get(k, {}).get(str(t["id"]))
+        return None if r is None else pa(r)
+    L = [f"# Texture ideas: Jev on Felix's {len(items)} interest pairs (11-12)\n",
+         "Agreement with Felix, both orders averaged; chance 0.50. These pairs also choose the weight, so the "
+         "leave-one-out column is the honest one; confirm anything that helps on fresh ratings.\n",
+         "| picture | interest question | agree |", "|---|---|---|"]
+    for fmt in TEX_PICS:
+        base = f"{fmt}/pipeline"
+        L.append(f"| {fmt} | as before | {acc(lambda t: (lambda p: None if p is None else p - 0.5)(get(R, base, t)))[0]:.2f} |")
+        for k in PR.TEX_INTEREST:
+            L.append(f"| {fmt} | {k} | "
+                     f"{acc(lambda t: (lambda p: None if p is None else p - 0.5)(get(T, f'{fmt}/interest+{k}', t)))[0]:.2f} |")
+    L += ["\nSubtracting a texture question: score = logit P(interest) - w * logit P(more textured/speckled), w >= 0.\n",
+          "| picture | subtracted question | w = 1 | best w (in-sample) | leave-one-out | Jev says Felix's world is the more textured/speckled |",
+          "|---|---|---|---|---|---|"]
+    W = [0, 0.25, 0.5, 1, 2, 4]
+    for fmt in TEX_PICS:
+        for k in PR.TEX_ASK:
+            def sc(t, w, fmt=fmt, k=k):
+                pi, px = get(R, f"{fmt}/pipeline", t), get(T, f"{fmt}/ask:{k}", t)
+                return None if pi is None or px is None else lg(pi) - w * lg(px)
+            fits = {w: acc(lambda t, w=w: sc(t, w))[0] for w in W}
+            bw = max(W, key=lambda w: (fits[w], -w))
+            loo = []
+            for i, t in enumerate(items):                    # choose w without pair i, score pair i
+                rest = items[:i] + items[i + 1:]
+
+                def acc_rest(w):
+                    v = [(sc(u, w) > 0) == (u["felix"] == u["a"]) for u in rest if sc(u, w) is not None]
+                    return sum(v) / max(len(v), 1)
+                w = max(W, key=lambda w: (acc_rest(w), -w))
+                x = sc(t, w)
+                if x is not None:
+                    loo.append(1.0 if (x > 0) == (t["felix"] == t["a"]) else 0.0)
+            tex = [get(T, f"{fmt}/ask:{k}", t) for t in items]
+            fel = np.mean([(p > 0.5) == (t["felix"] == t["a"]) for p, t in zip(tex, items) if p is not None and p != 0.5])
+            L.append(f"| {fmt} | {k} | {fits[1]:.2f} | {fits[bw]:.2f} (w = {bw}) | {np.mean(loo):.2f} | {fel:.2f} |")
+    fc = np.mean([1.0 if t["change"][t["felix"]] > max(v for w, v in t["change"].items() if w != t["felix"]) else 0.0
+                  for t in items])
+    L.append(f"\nFree change measure on the same pairs: {fc:.2f}. Bar to clear: beat it, not just R0.")
+    (out / "texture.md").write_text("\n".join(L) + "\n")
+    print("\n".join(L))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for c in ("build", "judge", "report"):
+    for c in ("build", "judge", "report", "texture"):
         sub.add_parser(c).add_argument("--out", required=True, help="the benchmark folder")
     b = sub.choices["build"]
     b.add_argument("--source", required=True, help="the full run with Felix's rating session (RUNS/full-s1)")
@@ -273,8 +365,13 @@ def main() -> None:
     j.add_argument("--judge", default="jev")
     j.add_argument("--config", default=None)
     j.add_argument("--max-usd", type=float, default=0.4, help="hard cap on this benchmark's judge cache in total")
+    x = sub.choices["texture"]
+    x.add_argument("--judge", default="jev")
+    x.add_argument("--config", default=None)
+    x.add_argument("--max-usd", type=float, default=0.6, help="hard cap on this benchmark's judge cache in total")
+    x.add_argument("--report-only", dest="judge_calls", action="store_false", help="re-read texture.json, no calls")
     a = ap.parse_args()
-    {"build": build, "judge": judge, "report": report}[a.cmd](a)
+    {"build": build, "judge": judge, "report": report, "texture": texture}[a.cmd](a)
 
 
 if __name__ == "__main__":

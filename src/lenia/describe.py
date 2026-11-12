@@ -45,6 +45,12 @@ RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504, 524, 529}
 FATAL_STATUS = {401, 402, 403}
 
 
+def policy_refusal(code, msg: str) -> bool:
+    """Vertex's 403 "Request rejected in accordance with our terms of use and policies" refuses one request's content
+    (11-11: a film-strip ask, after ~200 asks had succeeded), unlike a 403 for credentials or billing, which stops every call."""
+    return code == 403 and "terms of use" in msg
+
+
 @dataclass
 class Ask:
     prompt_id: str
@@ -240,6 +246,8 @@ class Describer:
                 break
             except Exception as e:
                 code = getattr(e, "code", None)
+                if policy_refusal(code, str(e)):                   # one request refused for content: a failed call, not the run
+                    raise RuntimeError(f"Vertex refused this request (policy): {e}")
                 if code in FATAL_STATUS or code == 404:
                     raise FatalAPIError(f"Vertex {code}: {e}")
                 if code not in RETRY_STATUS or attempt == int(self.cfg.get("max_retries", 5)):
@@ -293,6 +301,8 @@ class Describer:
                 break
             except urllib.error.HTTPError as e:
                 last = f"Vertex HTTP {e.code}: {e.read().decode(errors='replace')[:500]}"
+                if policy_refusal(e.code, last):
+                    raise RuntimeError(f"Vertex refused this request (policy): {last}")
                 if e.code in FATAL_STATUS or e.code == 404:
                     raise FatalAPIError(last)
                 if e.code not in RETRY_STATUS:

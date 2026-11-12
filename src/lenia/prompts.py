@@ -451,6 +451,38 @@ def rate_prompt(fmt: str, base_pid: str, motion: bool = False) -> str:
     return pid
 
 
+# Texture variants of INTEREST (11-12, ratebench texture): Felix avoids "super textured blobs ... a kind of entropy" but
+# picks the more detailed world on 62% of interest pairs, so his literal wording and a speckle-specific one are tested
+# side by side, as an instruction added to INTEREST and as a separate question to subtract.
+_IQ = PROMPTS[INTEREST]["instructions"]
+TEX_RULE = {
+    "notexture": " Disregard texture: don't prefer a world because its surface looks more detailed, grainy or textured.",
+    "nospeckle": " A blob covered in uniform, grainy speckle, like static or noise, is not richer structure: prefer "
+                 "organized structure and coherent behaviour over noise-like texture.",
+    "organized": " Prefer a world that looks non-entropic and made with intent: organized, clear and clean, rather than "
+                 "noisy or chaotic.",                  # Felix's wording (11-12)
+}
+_CLAUSE = ("Which world is more interesting as artificial life: richer structure or behaviour, more like something alive, "
+           "more worth exploring further?")
+assert _CLAUSE in _IQ
+_IQ_PLAIN = _IQ.replace(_CLAUSE, "Which world is more interesting as artificial life, more worth exploring further?")
+_TEX_TEXT = {k: _IQ + r for k, r in TEX_RULE.items()}
+_TEX_TEXT["plain"] = _IQ_PLAIN                           # Felix (11-12): drop "richer structure or behaviour, more like
+_TEX_TEXT["plain+organized"] = _IQ_PLAIN + TEX_RULE["organized"]     # something alive" (may invite texture / a cell look)
+TEX_INTEREST = {}
+for _k, _t in _TEX_TEXT.items():
+    TEX_INTEREST[_k] = f"interest_{_k}"
+    PROMPTS.setdefault(TEX_INTEREST[_k], {"instructions": _t, "first": PROMPTS[INTEREST]["first"],
+                                          "second": PROMPTS[INTEREST]["second"]})
+TEX_ASK = {"textured": "aux_textured", "speckled": "aux_speckled"}
+PROMPTS.setdefault("aux_textured", {
+    "instructions": WORLD.replace("{N}", "two worlds") + " The two images are {A} and {B}. Which world is more textured?",
+    "first": "The world in {A} is more textured.", "second": "The world in {B} is more textured."})
+PROMPTS.setdefault("aux_speckled", {
+    "instructions": WORLD.replace("{N}", "two worlds") + " The two images are {A} and {B}. Which world is more covered "
+                    "in uniform, noise-like speckle, like static or grain spread evenly over its bodies?",
+    "first": "The world in {A} is more speckled.", "second": "The world in {B} is more speckled."})
+
 # ---------- lookup ----------
 
 def get_prompt(prompt_id: str) -> dict[str, str]:
