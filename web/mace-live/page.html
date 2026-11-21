@@ -64,6 +64,7 @@ button.on{border-color:var(--acc);box-shadow:inset 0 0 0 1px var(--acc)}
 <div class="about">
   <p><b>What you're looking at.</b> Each world is a continuous cellular automaton in the Lenia family, using a mass-conserving update (MaCE): mass is never created or destroyed, only moved toward where the rule's growth field attracts it. The three colours are three interacting channels; the world wraps around at its edges.</p>
   <p><b>Where the worlds come from.</b> Each rule was found by an evolutionary search that judged worlds at step 2,700. Run them far past that: some keep moving indefinitely, some merge into one body, some freeze.</p>
+  <p><b>The ASAL group.</b> The final population of ASAL's illumination search (Kumar et al. 2024, "Automating the Search for Artificial Life with Foundation Models"), which we ran on this substrate as a baseline: it keeps the set of worlds whose final frames at step 2,700 look least alike to CLIP, with no judge of quality. Numbers follow that run's contact sheet. Its objective ignores motion, so some of these worlds barely move.</p>
 </div>
 </main>
 <script id="simsrc" type="text/plain">/*SIM*/</script>
@@ -231,7 +232,11 @@ $("eng").textContent = engine.name;
     : `<a href="${u}">Try the GPU engine</a>: faster, but single precision, so long runs drift away from this one.`; }
 
 const sel = $("world");
-DATA.worlds.forEach((w, i) => { const o = document.createElement("option"); o.value = i; o.textContent = w.name; sel.appendChild(o); });
+const groups = {};
+DATA.worlds.forEach((w, i) => {
+  const gname = w.group || "Worlds";
+  if (!groups[gname]) { groups[gname] = document.createElement("optgroup"); groups[gname].label = gname; sel.appendChild(groups[gname]); }
+  const o = document.createElement("option"); o.value = i; o.textContent = w.name; groups[gname].appendChild(o); });
 const start = Math.max(0, DATA.worlds.findIndex(w => w.name === "Closing ring"));
 sel.value = start; engine.load(DATA.worlds[start].rule);
 const startSpeed = Q.has("speed") ? Math.max(1, +Q.get("speed") || 8) : 8; engine.speed(startSpeed);
