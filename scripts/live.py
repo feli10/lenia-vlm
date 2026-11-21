@@ -3,7 +3,11 @@
   cd ~/Projects/lenia-vlm && PYTHONPATH=src:scripts python3 scripts/live.py            # then open http://localhost:8790
 
 Worlds: the qd2 catalog (12) and its "more creatures" (8), grown exactly as the map grows them (same settings, same
-fixed noise start) on the numpy backend, so a world here behaves like the long runs in lenia-runs/longrun. The page:
+fixed noise start) on the numpy backend, so a world here behaves like the long runs in lenia-runs/longrun. Then, if
+runs/asal-illum-s1 holds sheet_30464.json and members.jsonl (copied from lenia-runs/asal-illum-s1), the 256 worlds of
+the ASAL illumination baseline's final population, named by their number on sheet_30464.png. That run used the same
+size, R and noise start as qd2, so its worlds start here exactly as they did there (like every world on this CPU
+backend, they drift from the Colab GPU run over long times: the worlds are chaotic). The page:
 pick a world, pause, speed, reset, and click the world to drop a blob of mass (it is no longer mass-conserving then).
 No judge calls, nothing written to disk.
 """
@@ -26,7 +30,22 @@ from lenia.config import REPO_ROOT
 from lenia.sim import Rule
 
 RUN = REPO_ROOT / "runs" / "mace-qd2"
+ASAL = REPO_ROOT / "runs" / "asal-illum-s1"       # sheet_30464.json + members.jsonl, from lenia-runs/asal-illum-s1
 HIDE = {"Labyrinth cell", "Four-lobed cluster", "Clover", "Lumpy amoeba", "Rimmed starfish"}   # Felix, 11-12
+
+
+def asal_worlds() -> list:
+    """ASAL's final population (30,464 simulations), in sheet order; [] if the files aren't in runs/asal-illum-s1."""
+    sheet, members = ASAL / "sheet_30464.json", ASAL / "members.jsonl"
+    if not (sheet.exists() and members.exists()):
+        return []
+    rules = {}
+    for line in members.read_text().splitlines():
+        m = json.loads(line)
+        rules[m["id"]] = m["rule"]
+    order = json.loads(sheet.read_text())
+    return [{"name": f"ASAL #{k} ({order[k]})", "rule": rules[order[k]], "group": "ASAL illumination (sheet numbers)"}
+            for k in sorted(order, key=int)]
 
 
 def worlds() -> list:
@@ -34,7 +53,8 @@ def worlds() -> list:
     more = RUN / "catalog" / "more" / "more.json"
     if more.exists():
         out += [{"name": c["name"], "rule": c["rule"]} for c in json.loads(more.read_text())]
-    return [w for w in out if w["name"] not in HIDE]
+    out = [{**w, "group": "Catalog (qd2)"} for w in out if w["name"] not in HIDE]
+    return out + asal_worlds()
 
 
 class Sim:
@@ -42,7 +62,9 @@ class Sim:
         self.ea = QD.settings(json.loads((RUN / "state.json").read_text()))
         self.W, self.lock = worlds(), threading.Lock()
         self.speed, self.paused, self.px = a.speed, False, a.px
-        self.load(next((i for i, w in enumerate(self.W) if w["name"].lower() == a.world.lower()), 0))
+        want = a.world.lower()                              # "ASAL #12" is enough for "ASAL #12 (i0883_20)"
+        self.load(next((i for i, w in enumerate(self.W) if w["name"].lower() == want or
+                        w["name"].lower().startswith(want + " (")), 0))
 
     def load(self, i: int) -> None:
         with self.lock:
@@ -114,7 +136,8 @@ body{background:#111;color:#ddd;font:14px -apple-system,Segoe UI,sans-serif;marg
 <script>
 const W=document.getElementById('w'),st=document.getElementById('st'),sel=document.getElementById('sel');
 const post=(p,b)=>fetch(p,{method:'POST',body:JSON.stringify(b||{})});
-fetch('/worlds').then(r=>r.json()).then(ns=>{ns.forEach((n,i)=>{const o=document.createElement('option');o.value=i;o.textContent=n;sel.appendChild(o)})});
+fetch('/worlds').then(r=>r.json()).then(ws=>{const g={};ws.forEach((w,i)=>{if(!g[w.group]){g[w.group]=document.createElement('optgroup');g[w.group].label=w.group;sel.appendChild(g[w.group])}
+ const o=document.createElement('option');o.value=i;o.textContent=w.name;g[w.group].appendChild(o)})});
 sel.onchange=()=>post('/cmd',{world:+sel.value});
 document.getElementById('pp').onclick=()=>post('/cmd',{pause:'toggle'});
 document.getElementById('rs').onclick=()=>post('/cmd',{world:+sel.value});
@@ -160,7 +183,8 @@ def serve(a) -> None:
                 jpg, state = S.frame()
                 return self._send(200, jpg, "image/jpeg", {"X-State": json.dumps(state)})
             if self.path == "/worlds":
-                return self._send(200, json.dumps([w["name"] for w in S.W]).encode(), "application/json")
+                return self._send(200, json.dumps([{"name": w["name"], "group": w["group"]} for w in S.W]).encode(),
+                                  "application/json")
             if self.path == "/":
                 return self._send(200, PAGE.replace("PX", str(S.px)).encode(), "text/html; charset=utf-8")
             self._send(404, b"", "text/plain")
@@ -186,7 +210,7 @@ def serve(a) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--world", default="Closing ring", help="a world's name from the catalog")
+    ap.add_argument("--world", default="Closing ring", help='a world\'s name: "Closing ring", or e.g. "ASAL #12"')
     ap.add_argument("--speed", type=int, default=10, help="simulation steps per displayed frame (changeable on the page)")
     ap.add_argument("--px", type=int, default=560, help="display size in pixels")
     ap.add_argument("--port", type=int, default=8790)
